@@ -7,6 +7,7 @@ import { useTranslations } from "next-intl";
 import {
   Cloud,
   LayoutDashboard,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   Server,
@@ -20,6 +21,7 @@ import { UserMenu } from "./user-menu";
 const NAV = [
   { href: "/", key: "dashboard", icon: LayoutDashboard, exact: true },
   { href: "/servers", key: "servers", icon: Server },
+  { href: "/networks", key: "networks", icon: Network },
   { href: "/tickets", key: "tickets", icon: Ticket },
 ] as const;
 

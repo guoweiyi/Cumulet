@@ -50,6 +50,8 @@ export interface IHypervisorProvider {
   readonly type: ProviderType;
   readonly instanceId: string;
 
+  healthCheck(): Promise<{ version?: string; capabilities: string[] }>;
+
   provision(input: ProvisionInput): Promise<ProvisionResult>;
   getStatus(resource: ProviderResourceRef): Promise<ProviderResourceStatus>;
   powerOn(resource: ProviderResourceRef): Promise<ProviderTask>;
@@ -58,4 +60,3 @@ export interface IHypervisorProvider {
   forceStop(resource: ProviderResourceRef): Promise<ProviderTask>;
   resize(input: ResizeInput): Promise<ProviderTask>;
 }
-

@@ -17,6 +17,21 @@ export const aiAnalysisSchema = z.object({
 
 export type AiAnalysis = z.infer<typeof aiAnalysisSchema>;
 
+export const provisioningDiagnosisSchema = z.object({
+  likelyCause: z.string().min(1).max(1500),
+  confidence: z.enum(["low", "medium", "high"]),
+  checks: z.array(z.string().min(1).max(500)).min(1).max(8),
+  recoveryActions: z.array(z.string().min(1).max(500)).min(1).max(8),
+  safeToRetry: z.boolean(),
+});
+export type ProvisioningDiagnosis = z.infer<typeof provisioningDiagnosisSchema>;
+
+export function parseProvisioningDiagnosis(content: string): ProvisioningDiagnosis {
+  const trimmed = content.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1];
+  return provisioningDiagnosisSchema.parse(JSON.parse((fenced ?? trimmed).trim()));
+}
+
 export type MetricSummary = {
   sampleCount: number;
   cpu: { average: number | null; peak: number | null };

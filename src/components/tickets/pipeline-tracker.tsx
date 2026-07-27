@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { AlertCircle, Check, CircleDashed, Loader2, MinusCircle, RotateCw, SkipForward } from "lucide-react";
+import { AlertCircle, BrainCircuit, Check, CircleDashed, Loader2, MinusCircle, RotateCw, SkipForward } from "lucide-react";
 import type { TicketDetailData } from "@/lib/ticket-data";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -25,7 +25,9 @@ export function PipelineTracker({
 }) {
   const t = useTranslations("pipeline");
   const tc = useTranslations("common");
+  const locale = useLocale();
   const [busyStep, setBusyStep] = useState<string | null>(null);
+  const [diagnoses, setDiagnoses] = useState<Record<string, { likelyCause: string; confidence: string; checks: string[]; recoveryActions: string[]; safeToRetry: boolean }>>({});
   const binding = ticket.binding;
   if (!binding || binding.steps.length === 0) return null;
 
@@ -41,11 +43,27 @@ export function PipelineTracker({
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         toast.error(data?.error?.message ?? tc("requestFailed"));
+      } else {
+        toast.success(t(action === "skip" ? "skipContinued" : "retryContinued"));
       }
-      reload();
+      await reload();
     } finally {
       setBusyStep(null);
     }
+  }
+
+  async function diagnose(step: string) {
+    setBusyStep(step);
+    try {
+      const res = await fetch(`/api/admin/bindings/${binding!.id}/ai-diagnose`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step, locale: locale === "en" ? "en" : "zh" }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) { toast.error(data?.error?.message ?? tc("requestFailed")); return; }
+      setDiagnoses((current) => ({ ...current, [step]: data.diagnosis }));
+    } finally { setBusyStep(null); }
   }
 
   return (
@@ -92,6 +110,9 @@ export function PipelineTracker({
                     )}
                     {canWrite && s.status === "FAILED" && (
                       <span className="ml-auto flex gap-1">
+                        <Button size="sm" variant="outline" className="h-7 text-xs" disabled={busyStep !== null} onClick={() => diagnose(s.step)}>
+                          <BrainCircuit className="size-3" /> {t("aiDiagnose")}
+                        </Button>
                         <Button
                           size="sm"
                           variant="outline"
@@ -122,6 +143,14 @@ export function PipelineTracker({
                     <p className="mt-1 whitespace-pre-wrap rounded bg-red-50 px-2 py-1.5 text-xs text-red-600">
                       {s.errorMessage}
                     </p>
+                  )}
+                  {diagnoses[s.step] && (
+                    <div className="mt-2 space-y-2 rounded border border-fuchsia-200 bg-fuchsia-50/60 p-3 text-xs">
+                      <div className="font-medium text-fuchsia-900">{diagnoses[s.step].likelyCause}</div>
+                      <div className="text-fuchsia-700">{t("confidence")}: {t(`confidenceValue.${diagnoses[s.step].confidence}`)} · {t(diagnoses[s.step].safeToRetry ? "safeToRetry" : "reviewBeforeRetry")}</div>
+                      <div><div className="font-medium">{t("checks")}</div><ul className="mt-1 list-disc space-y-1 pl-4">{diagnoses[s.step].checks.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                      <div><div className="font-medium">{t("recoveryActions")}</div><ul className="mt-1 list-disc space-y-1 pl-4">{diagnoses[s.step].recoveryActions.map((item) => <li key={item}>{item}</li>)}</ul></div>
+                    </div>
                   )}
                 </div>
               </li>

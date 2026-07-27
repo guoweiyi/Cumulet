@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Download, Loader2, Plus, RotateCw, Trash2 } from "lucide-react";
+import { Download, Loader2, PlugZap, Plus, RotateCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -99,6 +99,13 @@ const WEBHOOK_EVENTS = [
   "RESOURCE_EXPIRED",
   "RESOURCE_PENDING_DELETION",
 ] as const;
+
+const PROVIDER_CONFIGS: Record<string, Record<string, unknown>> = {
+  AWS: { region: "cn-north-1" },
+  ESXI: { baseUrl: "https://vcenter.example.com", username: "administrator@vsphere.local", tlsVerify: true },
+  FNOS: { baseUrl: "https://fnos.example.com", tlsVerify: true, healthPath: "/api/v1/system/info", statusPath: "/api/v1/vms/{id}", powerPath: "/api/v1/vms/{id}/power", resizePath: "/api/v1/vms/{id}/hardware" },
+  CUSTOM: {},
+};
 
 export function PlatformManager({ canWrite }: { canWrite: boolean }) {
   const t = useTranslations("admin.platform");
@@ -316,10 +323,10 @@ function AccessTab({ data, canWrite, busy, mutate }: { data: PlatformData; canWr
 
 function ProviderTab({ providers, canWrite, busy, mutate }: { providers: Provider[]; canWrite: boolean; busy: string | null; mutate: Mutate }) {
   const t = useTranslations("admin.platform");
-  const [form, setForm] = useState({ name: "", type: "CUSTOM", config: "{}", secret: "" });
+  const [form, setForm] = useState({ name: "", type: "AWS", config: JSON.stringify(PROVIDER_CONFIGS.AWS, null, 2), secret: "" });
   const parsedConfig = useMemo(() => { try { return JSON.parse(form.config) as unknown; } catch { return null; } }, [form.config]);
-  return <div className="space-y-4"><DataRows rows={providers.map((item) => ({ id: item.id, primary: item.name, secondary: `${item.type} · ${item._count.resources} ${t("resources")}`, status: item.status }))} empty={t("empty")} actions={canWrite ? (id) => <DeleteButton busy={busy === `provider-${id}`} label={t("delete")} onClick={() => mutate(`provider-${id}`, `/api/admin/providers/${id}`, "DELETE")} /> : undefined} />
-    {canWrite && <InlineForm columns={2} disabled={!form.name || parsedConfig === null || busy !== null} onSubmit={() => mutate("provider-create", "/api/admin/providers", "POST", { name: form.name, type: form.type, config: parsedConfig, secret: form.secret || undefined })}><Field label={t("name")}><Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field><Field label={t("providerType")}><Select value={form.type} onValueChange={(value) => setForm({ ...form, type: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["ESXI", "FNOS", "AWS", "CUSTOM"].map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select></Field><Field label={t("providerConfig")}><Textarea rows={4} className="font-mono text-xs" value={form.config} onChange={(event) => setForm({ ...form, config: event.target.value })} /></Field><Field label={t("secret")}><Input type="password" value={form.secret} onChange={(event) => setForm({ ...form, secret: event.target.value })} /></Field></InlineForm>}
+  return <div className="space-y-4"><DataRows rows={providers.map((item) => ({ id: item.id, primary: item.name, secondary: `${item.type} · ${item._count.resources} ${t("resources")}`, status: item.status }))} empty={t("empty")} actions={canWrite ? (id) => <div className="flex gap-1"><Button size="icon-sm" variant="ghost" title={t("testProvider")} disabled={busy !== null} onClick={() => mutate(`provider-test-${id}`, `/api/admin/providers/${id}/test`, "POST")}><PlugZap className={busy === `provider-test-${id}` ? "animate-pulse" : ""} /></Button><DeleteButton busy={busy === `provider-${id}`} label={t("delete")} onClick={() => mutate(`provider-${id}`, `/api/admin/providers/${id}`, "DELETE")} /></div> : undefined} />
+    {canWrite && <InlineForm columns={2} disabled={!form.name || parsedConfig === null || busy !== null} onSubmit={() => mutate("provider-create", "/api/admin/providers", "POST", { name: form.name, type: form.type, config: parsedConfig, secret: form.secret || undefined })}><Field label={t("name")}><Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field><Field label={t("providerType")}><Select value={form.type} onValueChange={(value) => setForm({ ...form, type: value, config: JSON.stringify(PROVIDER_CONFIGS[value] ?? {}, null, 2) })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["AWS", "ESXI", "FNOS", "CUSTOM"].map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select></Field><Field label={t("providerConfig")}><Textarea rows={6} className="font-mono text-xs" value={form.config} onChange={(event) => setForm({ ...form, config: event.target.value })} /></Field><Field label={t("secret")}><Input type="password" value={form.secret} onChange={(event) => setForm({ ...form, secret: event.target.value })} /></Field></InlineForm>}
   </div>;
 }
 

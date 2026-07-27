@@ -47,7 +47,8 @@ export async function vmContext(bindingId: string, opts?: { write?: boolean }): 
 /** Convert PveError to a friendly 502 ApiError (never leak token/URL details). */
 export function mapPveError(err: unknown): never {
   if (err instanceof PveError) {
-    throw new ApiError(502, "pve_error", err.message);
+    const code = err.status === 403 ? "pve_permission_denied" : "pve_error";
+    throw new ApiError(502, code, err.message);
   }
   if (err instanceof ApiError) throw err;
   throw err;

@@ -47,6 +47,20 @@ type StepContext = {
   runState: { ciPassword?: string; assetName: string };
 };
 
+function provisionMeta(binding: BindingFull): Record<string, unknown> {
+  return binding.provisionMeta && typeof binding.provisionMeta === "object" && !Array.isArray(binding.provisionMeta)
+    ? binding.provisionMeta as Record<string, unknown>
+    : {};
+}
+
+function shouldRunStep(binding: BindingFull, step: ProvisioningStepType): boolean {
+  const meta = provisionMeta(binding);
+  if (step === "PVE_SECURITY_GROUP") return meta.configureSecurityGroup !== false && !!binding.pveSecurityGroup;
+  if (step === "JS_ASSET" || step === "JS_PERMISSION") return meta.configureJumpServer !== false;
+  if (step === "EXTERNAL_ACCESS") return !!meta.externalAccess;
+  return true;
+}
+
 async function loadBinding(bindingId: string): Promise<BindingFull> {
   const binding = await prisma.resourceBinding.findUnique({
     where: { id: bindingId },
@@ -97,7 +111,7 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
     const password = generateVmPassword();
     runState.ciPassword = password;
     // ipconfig / nameserver come from admin-provided values captured at approve.
-    const meta = (binding.provisionMeta as Record<string, string> | null) ?? {};
+    const meta = provisionMeta(binding) as Record<string, string>;
     await provider.provision({
       providerResourceId: binding.resource.providerResourceId,
       displayName: binding.resource.displayName,
@@ -346,7 +360,7 @@ async function makeContext(binding: BindingFull, actorId: string): Promise<StepC
     pve: pveClient(binding.pveNode, actorId),
     provider: await getHypervisorProvider(binding.resource.providerId, actorId),
     actorId,
-    runState: { assetName: `cumulet-${binding.vmid}` },
+    runState: { assetName: binding.resource.displayName },
   };
 }
 
@@ -388,23 +402,33 @@ async function reconcileTicketStatus(bindingId: string, ticketId: string): Promi
   }
 }
 
+async function continuePipeline(
+  ctx: StepContext,
+  startIndex: number,
+): Promise<boolean> {
+  for (const step of STEP_ORDER.slice(startIndex)) {
+    const existing = await prisma.provisioningStep.findUnique({
+      where: { bindingId_step: { bindingId: ctx.binding.id, step } },
+    });
+    if (existing?.status === "SUCCESS" || existing?.status === "SKIPPED") continue;
+    if (!shouldRunStep(ctx.binding, step)) {
+      await markStep(ctx.binding.id, step, "SKIPPED");
+      continue;
+    }
+    if (!(await runStep(ctx, step))) return false;
+  }
+  await reconcileTicketStatus(ctx.binding.id, ctx.binding.ticketId);
+  return true;
+}
+
 /** Run the whole pipeline in order, stopping at the first failure. */
 export async function runPipeline(bindingId: string, actorId: string): Promise<void> {
   const binding = await loadBinding(bindingId);
   const ctx = await makeContext(binding, actorId);
-  for (const step of STEP_ORDER) {
-    const existing = await prisma.provisioningStep.findUnique({
-      where: { bindingId_step: { bindingId, step } },
-    });
-    if (existing?.status === "SUCCESS" || existing?.status === "SKIPPED") continue;
-    const ok = await runStep(ctx, step);
-    if (!ok) {
-      const ticket = await prisma.ticket.findUnique({ where: { id: binding.ticketId } });
-      if (ticket && ticket.status === "PROVISIONING") await addSystemMessage(ticket.id, "provisionFailed");
-      return;
-    }
+  if (!(await continuePipeline(ctx, 0))) {
+    const ticket = await prisma.ticket.findUnique({ where: { id: binding.ticketId } });
+    if (ticket && ticket.status === "PROVISIONING") await addSystemMessage(ticket.id, "provisionFailed");
   }
-  await reconcileTicketStatus(bindingId, binding.ticketId);
 }
 
 /** Retry one step (and continue the remaining steps if it succeeds). */
@@ -417,17 +441,8 @@ export async function retryStep(
   const ctx = await makeContext(binding, actorId);
   const ok = await runStep(ctx, step);
   if (!ok) return;
-  // Continue with subsequent not-yet-successful steps.
   const idx = STEP_ORDER.indexOf(step);
-  for (const next of STEP_ORDER.slice(idx + 1)) {
-    const existing = await prisma.provisioningStep.findUnique({
-      where: { bindingId_step: { bindingId, step: next } },
-    });
-    if (existing?.status === "SUCCESS" || existing?.status === "SKIPPED") continue;
-    const cont = await runStep(ctx, next);
-    if (!cont) return;
-  }
-  await reconcileTicketStatus(bindingId, binding.ticketId);
+  await continuePipeline(ctx, idx + 1);
 }
 
 /** Deliberately skip a step (recorded + audited). */
@@ -437,6 +452,13 @@ export async function skipStep(
   actorId: string,
 ): Promise<void> {
   const binding = await loadBinding(bindingId);
+  const existing = await prisma.provisioningStep.findUnique({
+    where: { bindingId_step: { bindingId, step } },
+  });
+  if (!existing || existing.status === "SUCCESS" || existing.status === "SKIPPED") {
+    throw new Error("step_not_skippable");
+  }
+  const ctx = await makeContext(binding, actorId);
   await markStep(bindingId, step, "SKIPPED");
   await audit({
     actorId,
@@ -445,5 +467,5 @@ export async function skipStep(
     targetId: bindingId,
     metadata: { step },
   });
-  await reconcileTicketStatus(bindingId, binding.ticketId);
+  await continuePipeline(ctx, STEP_ORDER.indexOf(step) + 1);
 }

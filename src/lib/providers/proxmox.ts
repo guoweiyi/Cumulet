@@ -25,8 +25,11 @@ function vmidOf(resource: ProviderResourceRef): number {
 function mapError(error: unknown): never {
   if (error instanceof ProviderError) throw error;
   if (error instanceof PveError) {
+    const code = error.status === 403
+      ? "provider_permission_denied"
+      : error.status > 0 ? `provider_http_${error.status}` : "provider_unreachable";
     throw new ProviderError(
-      error.status > 0 ? `provider_http_${error.status}` : "provider_unreachable",
+      code,
       error.message,
       error,
     );
@@ -59,11 +62,22 @@ export class ProxmoxProvider implements IHypervisorProvider {
     return new ProxmoxProvider(instanceId, new PveClient(node, actorId));
   }
 
+  async healthCheck() {
+    try {
+      const version = await this.client.version();
+      await this.client.listNodeVms();
+      return { version: version.version, capabilities: ["status", "power", "resize", "cloud-init", "firewall", "guest-agent"] };
+    } catch (error) {
+      mapError(error);
+    }
+  }
+
   async provision(input: ProvisionInput): Promise<ProvisionResult> {
     const vmid = vmidOf(input);
     try {
       await this.client.vmStatus(vmid);
       const resizeTask = await this.resize(input);
+      await this.client.setConfig(vmid, { name: input.displayName });
       const cloudInit = input.cloudInit;
       if (cloudInit) {
         await this.client.setConfig(vmid, {

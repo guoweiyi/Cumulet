@@ -1,7 +1,7 @@
 "use client";
 
 import { signIn } from "next-auth/react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Suspense, useState } from "react";
 import { toast } from "sonner";
@@ -17,7 +17,6 @@ import { passwordLogin as passwordLoginAction } from "@/actions/auth";
 
 function AdminLoginInner() {
   const t = useTranslations("auth");
-  const router = useRouter();
   const params = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -30,13 +29,12 @@ function AdminLoginInner() {
     e.preventDefault();
     setBusy(true);
     try {
-      const result = await passwordLoginAction(email, password);
+      const result = await passwordLoginAction(email, password, callbackUrl);
       if (!result.success) {
         toast.error(t("invalidCredentials"));
         return;
       }
-      router.push(result.redirectUrl ?? callbackUrl);
-      router.refresh();
+      window.location.assign(result.redirectUrl ?? callbackUrl);
     } finally {
       setBusy(false);
     }
@@ -66,8 +64,7 @@ function AdminLoginInner() {
       const { token } = await verifyRes.json();
       const res = await signIn("passkey", { token, redirect: false });
       if (res?.error) throw new Error("signin");
-      router.push(callbackUrl);
-      router.refresh();
+      window.location.assign(callbackUrl);
     } catch {
       toast.error(t("passkeyFailed"));
     } finally {

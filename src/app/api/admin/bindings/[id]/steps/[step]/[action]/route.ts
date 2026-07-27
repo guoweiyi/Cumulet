@@ -21,5 +21,10 @@ export const POST = api<Ctx>(async (_req, ctx) => {
   } else {
     await skipStep(id, step as ProvisioningStepType, user.id);
   }
-  return json({ ok: true });
+  const steps = await prisma.provisioningStep.findMany({
+    where: { bindingId: id },
+    orderBy: { createdAt: "asc" },
+    select: { step: true, status: true, errorMessage: true },
+  });
+  return json({ ok: true, steps });
 });

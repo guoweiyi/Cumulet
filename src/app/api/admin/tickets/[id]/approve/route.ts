@@ -13,6 +13,7 @@ import { getDefaultQuota } from "@/lib/settings";
 import { getHypervisorProvider, ProviderError } from "@/lib/providers";
 import { emitTicketStatusChanged } from "@/lib/webhooks";
 import { addressInCidr, ticketRequestsExternalAccess } from "@/lib/networking";
+import { buildResourceName } from "@/lib/resource-naming";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -41,7 +42,9 @@ const approveSchema = z.object({
   sshKeys: z.string().max(4000).optional().default(""),
   nameserver: z.string().max(64).optional().default(""),
   ipconfig: z.string().max(128).optional().default(""),
-  securityGroup: z.string().min(1).max(64),
+  configureSecurityGroup: z.boolean().default(true),
+  securityGroup: z.string().min(1).max(64).optional(),
+  configureJumpServer: z.boolean().default(true),
   leaseDurationDays: z.number().int().min(1).max(3650).optional().default(30),
   subnetId: z.string().min(1).optional(),
   externalAccess: externalAccessSchema.optional(),
@@ -67,6 +70,7 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   const parsed = approveSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) throw badRequest("invalid_approve");
   const data = parsed.data;
+  if (data.configureSecurityGroup && !data.securityGroup) throw badRequest("security_group_required");
   if (ticketRequestsExternalAccess(ticket.values) && !data.externalAccess) {
     throw badRequest("external_access_config_required");
   }
@@ -123,7 +127,7 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
       providerResourceId: String(data.vmid),
     });
   } catch (error) {
-    if (error instanceof ProviderError) throw new ApiError(502, error.code);
+    if (error instanceof ProviderError) throw new ApiError(502, error.code, error.message);
     throw error;
   }
   const requested = requestedCapacity(ticket.values, {
@@ -145,9 +149,8 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   const values = ticket.values && typeof ticket.values === "object" && !Array.isArray(ticket.values)
     ? (ticket.values as Record<string, unknown>)
     : {};
-  const displayName = typeof values.resource_name === "string"
-    ? values.resource_name.slice(0, 128)
-    : `VM ${data.vmid}`;
+  const requestedName = typeof values.resource_name === "string" ? values.resource_name : `vm-${data.vmid}`;
+  const displayName = buildResourceName(ticket.user, requestedName, data.vmid);
 
   const binding = await prisma.$transaction(async (tx) => {
     await assertQuotaAvailable(tx, ticket.userId, capacity, defaultQuota);
@@ -180,12 +183,14 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
         internalIp: data.internalIp,
         boundById: user.id,
         cloudInitUser: data.ciUser,
-        pveSecurityGroup: data.securityGroup,
+        pveSecurityGroup: data.configureSecurityGroup ? data.securityGroup : null,
         resourceId: resource.id,
         provisionMeta: {
           ipconfig: data.ipconfig,
           nameserver: data.nameserver,
           sshKeys: data.sshKeys,
+          configureSecurityGroup: data.configureSecurityGroup,
+          configureJumpServer: data.configureJumpServer,
           ...(data.externalAccess ? { externalAccess: data.externalAccess } : {}),
         } as Prisma.InputJsonValue,
       },

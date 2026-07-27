@@ -24,7 +24,12 @@ export default async function proxy(req: NextRequest) {
     pathname.startsWith("/api/credentials/");
   if (isPublic) return NextResponse.next();
 
-  const secure = req.nextUrl.protocol === "https:";
+  const forwardedProto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const configuredProtocol = (() => {
+    try { return new URL(process.env.NEXTAUTH_URL ?? process.env.AUTH_URL ?? req.url).protocol; }
+    catch { return req.nextUrl.protocol; }
+  })();
+  const secure = forwardedProto === "https" || configuredProtocol === "https:" || req.nextUrl.protocol === "https:";
   const cookieName = secure ? "__Secure-authjs.session-token" : "authjs.session-token";
   const token = await getToken({
     req,

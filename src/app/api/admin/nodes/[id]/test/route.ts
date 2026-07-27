@@ -5,7 +5,7 @@ import { pveClient, PveError } from "@/lib/pve";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-/** "Test Connection": GET /api2/json/version against the stored node. */
+/** Test authentication plus the read permissions needed by provisioning. */
 export const POST = api<Ctx>(async (_req, ctx) => {
   const user = await requireAdminWrite();
   const { id } = await ctx.params;
@@ -13,18 +13,49 @@ export const POST = api<Ctx>(async (_req, ctx) => {
   if (!node) throw notFound();
 
   try {
-    const version = await pveClient(node, user.id).version();
+    const client = pveClient(node, user.id);
+    const version = await client.version();
+    const checks = {
+      vmAudit: { ok: true, message: "" },
+      firewallAudit: { ok: true, message: "" },
+    };
+    try {
+      await client.listNodeVms();
+    } catch (error) {
+      checks.vmAudit = {
+        ok: false,
+        message: error instanceof PveError ? error.message : "VM inventory check failed",
+      };
+    }
+    try {
+      await client.listGroups();
+    } catch (error) {
+      checks.firewallAudit = {
+        ok: false,
+        message: error instanceof PveError ? error.message : "Firewall check failed",
+      };
+    }
+    const computeReady = checks.vmAudit.ok;
     await prisma.pveNode.update({
       where: { id },
       data: {
-        verified: true,
-        verifiedAt: new Date(),
+        verified: computeReady,
+        verifiedAt: computeReady ? new Date() : null,
         ...(node.providerInstanceId
-          ? { providerInstance: { update: { status: "ACTIVE", verifiedAt: new Date() } } }
+          ? { providerInstance: { update: { status: computeReady ? "ACTIVE" : "ERROR", verifiedAt: computeReady ? new Date() : null } } }
           : {}),
       },
     });
-    return json({ ok: true, version: version.version });
+    return json({
+      ok: computeReady,
+      version: version.version,
+      checks,
+      requiredPrivileges: {
+        base: ["VM.Audit", "VM.Config.CPU", "VM.Config.Memory", "VM.Config.Disk", "VM.Config.Cloudinit", "VM.PowerMgmt"],
+        guestAgentIp: ["VM.Monitor"],
+        securityGroups: ["Sys.Audit", "Sys.Modify", "VM.Config.Network"],
+      },
+    }, computeReady ? 200 : 409);
   } catch (err) {
     await prisma.pveNode.update({
       where: { id },

@@ -14,8 +14,10 @@ export class PveError extends Error {
   constructor(
     public status: number,
     message: string,
+    public readonly path?: string,
   ) {
     super(message);
+    this.name = "PveError";
   }
 }
 
@@ -80,7 +82,7 @@ export class PveClient {
         ...this.agentOpts,
       });
     } catch (err) {
-      throw new PveError(0, `PVE unreachable: ${err instanceof Error ? err.message : "network error"}`);
+      throw new PveError(0, `PVE unreachable: ${err instanceof Error ? err.message : "network error"}`, path);
     }
     const text = await res.text();
     if (!res.ok) {
@@ -93,7 +95,10 @@ export class PveClient {
       } catch {
         if (text) detail = text.slice(0, 300);
       }
-      throw new PveError(res.status, `PVE ${res.status}: ${detail}`);
+      const permissionHint = res.status === 403
+        ? " API token permission denied; check the token ACL and privilege separation."
+        : "";
+      throw new PveError(res.status, `PVE ${res.status}: ${detail}${permissionHint}`, path);
     }
     if (method !== "GET") {
       await audit({
@@ -116,6 +121,14 @@ export class PveClient {
     return this.request("GET", "/version");
   }
 
+  listNodeVms(): Promise<Array<{ vmid: number; name?: string; status?: string }>> {
+    return this.request("GET", `/nodes/${this.node.nodeName}/qemu`);
+  }
+
+  listNodeContainers(): Promise<Array<{ vmid: number; name?: string; status?: string }>> {
+    return this.request("GET", `/nodes/${this.node.nodeName}/lxc`);
+  }
+
   // --- VM lifecycle ---------------------------------------------------------
 
   vmStatus(vmid: number): Promise<VmCurrentStatus> {
@@ -124,6 +137,33 @@ export class PveClient {
 
   vmConfig(vmid: number): Promise<Record<string, string | number>> {
     return this.request("GET", `/nodes/${this.node.nodeName}/qemu/${vmid}/config`);
+  }
+
+  cloudInitNetworkDump(vmid: number): Promise<string> {
+    return this.request(
+      "GET",
+      `/nodes/${this.node.nodeName}/qemu/${vmid}/cloudinit/dump?type=network`,
+    );
+  }
+
+  async vmAgentNetworkInterfaces(vmid: number): Promise<PveGuestInterface[]> {
+    const response = await this.request<PveGuestInterface[] | { result?: PveGuestInterface[] }>(
+      "GET",
+      `/nodes/${this.node.nodeName}/qemu/${vmid}/agent/network-get-interfaces`,
+    );
+    return Array.isArray(response) ? response : response?.result ?? [];
+  }
+
+  lxcConfig(vmid: number): Promise<Record<string, string | number>> {
+    return this.request("GET", `/nodes/${this.node.nodeName}/lxc/${vmid}/config`);
+  }
+
+  async lxcNetworkInterfaces(vmid: number): Promise<PveLxcInterface[]> {
+    const response = await this.request<PveLxcInterface[] | null>(
+      "GET",
+      `/nodes/${this.node.nodeName}/lxc/${vmid}/interfaces`,
+    );
+    return Array.isArray(response) ? response : [];
   }
 
   power(vmid: number, action: PowerAction): Promise<string> {
@@ -355,6 +395,106 @@ export type PveFirewallRule = {
   macro?: string;
   comment?: string;
 };
+
+export type PveGuestInterface = {
+  name?: string;
+  "hardware-address"?: string;
+  "ip-addresses"?: Array<{
+    "ip-address"?: string;
+    "ip-address-type"?: "ipv4" | "ipv6" | string;
+    prefix?: number;
+  }>;
+};
+
+export type PveLxcInterface = {
+  name?: string;
+  hwaddr?: string;
+  inet?: string;
+  inet6?: string;
+};
+
+function ipv4Number(ip: string): number | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  const octets = parts.map(Number);
+  if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return (((octets[0] * 256 + octets[1]) * 256 + octets[2]) * 256 + octets[3]) >>> 0;
+}
+
+export function isPrivateIpv4(ip: string): boolean {
+  const value = ipv4Number(ip);
+  if (value === null) return false;
+  const inRange = (base: number, prefix: number) =>
+    (value >>> (32 - prefix)) === (base >>> (32 - prefix));
+  return inRange(0x0a000000, 8) || inRange(0xac100000, 12) || inRange(0xc0a80000, 16);
+}
+
+function normalizeMac(value: string): string {
+  return value.trim().toLowerCase().replaceAll("-", ":");
+}
+
+export function vmConfigMacs(config: Record<string, string | number>): string[] {
+  return Object.entries(config)
+    .filter(([key, value]) => /^net\d+$/.test(key) && typeof value === "string")
+    .map(([, value]) => String(value).match(/(?:^|,)(?:virtio|e1000|rtl8139|vmxnet3)=([0-9a-f:]{17})/i)?.[1] ?? "")
+    .filter(Boolean)
+    .map(normalizeMac);
+}
+
+/** Pick the primary guest address, preferring interfaces whose MAC is in the VM config. */
+export function selectGuestIp(interfaces: PveGuestInterface[], preferredMacs: string[] = []): string | null {
+  const preferred = new Set(preferredMacs.map(normalizeMac));
+  const addressesOf = (entries: PveGuestInterface[]) => entries
+    .flatMap((entry) => entry["ip-addresses"] ?? [])
+    .map((entry) => entry["ip-address"] ?? "")
+    .filter((ip) => ip && ip !== "127.0.0.1" && ip !== "::1" && !ip.startsWith("169.254.") && !ip.toLowerCase().startsWith("fe80:"));
+  const choose = (addresses: string[]) =>
+    addresses.find(isPrivateIpv4) ?? addresses.find((ip) => ipv4Number(ip) !== null) ?? addresses[0] ?? null;
+  if (preferred.size) {
+    const matched = interfaces.filter((entry) => preferred.has(normalizeMac(entry["hardware-address"] ?? "")));
+    const selected = choose(addressesOf(matched));
+    if (selected) return selected;
+  }
+  return choose(addressesOf(interfaces));
+}
+
+export function ipFromCloudInitConfig(ipconfig: string): string | null {
+  const candidates = [...ipconfig.matchAll(/(?:^|,)(?:ip|ip6)=([^,/]+)(?:\/\d+)?(?=,|$)/gi)]
+    .map((match) => match[1].trim())
+    .filter((ip) => !["dhcp", "auto", "manual"].includes(ip.toLowerCase()));
+  return candidates.find(isPrivateIpv4) ?? candidates.find((ip) => ipv4Number(ip) !== null) ?? candidates[0] ?? null;
+}
+
+export function ipFromVmConfig(config: Record<string, string | number>): string | null {
+  const candidates = Object.entries(config)
+    .filter(([key, value]) => /^ipconfig\d+$/.test(key) && typeof value === "string")
+    .map(([, value]) => ipFromCloudInitConfig(String(value)))
+    .filter((value): value is string => value !== null);
+  return candidates.find(isPrivateIpv4) ?? candidates[0] ?? null;
+}
+
+export function ipFromCloudInitDump(dump: string): string | null {
+  const candidates = [...dump.matchAll(/^\s+(?:address|addresses):\s*['"]?([^'"\s,\[\]]+)/gim)]
+    .map((match) => match[1].replace(/\/\d+$/, ""))
+    .filter((ip) => ipv4Number(ip) !== null || ip.includes(":"));
+  return candidates.find(isPrivateIpv4) ?? candidates[0] ?? null;
+}
+
+export function selectLxcIp(interfaces: PveLxcInterface[]): string | null {
+  const candidates = interfaces.flatMap((entry) => [entry.inet, entry.inet6])
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.split("/")[0])
+    .filter((ip) => ip !== "127.0.0.1" && ip !== "::1" && !ip.startsWith("169.254.") && !ip.toLowerCase().startsWith("fe80:"));
+  return candidates.find(isPrivateIpv4) ?? candidates.find((ip) => ipv4Number(ip) !== null) ?? candidates[0] ?? null;
+}
+
+export function ipFromLxcConfig(config: Record<string, string | number>): string | null {
+  const candidates = Object.entries(config)
+    .filter(([key, value]) => /^net\d+$/.test(key) && typeof value === "string")
+    .flatMap(([, value]) => [...String(value).matchAll(/(?:^|,)(?:ip|ip6)=([^,/]+)(?:\/\d+)?(?=,|$)/gi)].map((match) => match[1]))
+    .filter((ip) => ip && !["dhcp", "auto", "manual"].includes(ip.toLowerCase()));
+  return candidates.find(isPrivateIpv4) ?? candidates.find((ip) => ipv4Number(ip) !== null) ?? candidates[0] ?? null;
+}
 
 export type PveRuleInput = {
   type: "in" | "out" | "group";

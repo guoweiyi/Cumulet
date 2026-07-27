@@ -22,14 +22,19 @@ export type LoginResult = {
 export async function passwordLogin(
   email: string,
   password: string,
+  callbackUrl = "/admin",
 ): Promise<LoginResult> {
+  const safeCallback = callbackUrl.startsWith("/") && !callbackUrl.startsWith("//")
+    ? callbackUrl
+    : "/admin";
   try {
-    const redirectUrl = await signIn("admin-password", {
+    await signIn("admin-password", {
       email,
       password,
       redirect: false,
+      redirectTo: safeCallback,
     });
-    return { success: true, redirectUrl: redirectUrl ?? "/admin" };
+    return { success: true, redirectUrl: safeCallback };
   } catch (error) {
     if (error instanceof CredentialsSignin) {
       return { success: false, error: "credentials" };

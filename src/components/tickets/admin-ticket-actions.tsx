@@ -82,7 +82,9 @@ export function AdminTicketActions({
     sshKeys: "",
     nameserver: "",
     ipconfig: "",
+    configureSecurityGroup: true,
     securityGroup: "",
+    configureJumpServer: true,
     leaseDurationDays: "30",
     subnetId: "",
     externalEnabled: externalRequested,
@@ -98,7 +100,7 @@ export function AdminTicketActions({
 
   useEffect(() => {
     if (!approveOpen || options) return;
-    fetch("/api/admin/provision-options")
+    fetch(`/api/admin/provision-options?ticketId=${encodeURIComponent(ticket.id)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data: ProvisionOptions | null) => {
         if (!data) return;
@@ -112,7 +114,7 @@ export function AdminTicketActions({
         );
         setForm((f) => ({
           ...f,
-          pveNodeId: data.nodes[0]?.id ?? "",
+          pveNodeId: data.nodes.find((node) => node.verified)?.id ?? "",
           ciUser: data.defaultCiUser || "ubuntu",
           securityGroup:
             data.securityGroups.find((g) => g.isProvisioningDefault)?.name ??
@@ -124,7 +126,7 @@ export function AdminTicketActions({
           dnsZoneId: zone?.id ?? "",
         }));
       });
-  }, [approveOpen, options]);
+  }, [approveOpen, options, ticket.id]);
 
   async function post(url: string, body?: unknown): Promise<boolean> {
     setBusy(true);
@@ -155,10 +157,14 @@ export function AdminTicketActions({
       const data = await res.json();
       if (data.ip) {
         setForm((f) => ({ ...f, internalIp: data.ip, ipconfig: data.ipconfig ?? f.ipconfig }));
+        if (data.warning) toast.warning(t(data.warning));
         return;
       }
+      if (data.warning) toast.error(t(data.warning));
+      return;
     }
-    toast.error(tc("requestFailed"));
+    const data = await res.json().catch(() => null);
+    toast.error(data?.error?.message ?? tc("requestFailed"));
   }
 
   const status = ticket.status;
@@ -284,24 +290,34 @@ export function AdminTicketActions({
                   placeholder="223.5.5.5"
                 />
               </Field>
-              <Field label={t("securityGroup")}>
-                <Select
-                  value={form.securityGroup}
-                  onValueChange={(v) => setForm({ ...form, securityGroup: v })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {options.securityGroups.map((g) => (
-                      <SelectItem key={g.id} value={g.name}>
-                        {g.name}
-                        {g.description ? ` — ${localized(g.description, locale)}` : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </Field>
+              <div className="col-span-2 flex items-center justify-between gap-4 border-t border-neutral-200 pt-3">
+                <div>
+                  <Label>{t("configureSecurityGroup")}</Label>
+                  <p className="mt-0.5 text-xs text-neutral-500">{t("configureSecurityGroupHint")}</p>
+                </div>
+                <Switch checked={form.configureSecurityGroup} onCheckedChange={(checked) => setForm({ ...form, configureSecurityGroup: checked })} />
+              </div>
+              {form.configureSecurityGroup && (
+                <Field label={t("securityGroup")}>
+                  <Select value={form.securityGroup} onValueChange={(v) => setForm({ ...form, securityGroup: v })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {options.securityGroups.map((g) => (
+                        <SelectItem key={g.id} value={g.name}>
+                          {g.name}{g.description ? ` — ${localized(g.description, locale)}` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
+              <div className="col-span-2 flex items-center justify-between gap-4 border-t border-neutral-200 pt-3">
+                <div>
+                  <Label>{t("configureJumpServer")}</Label>
+                  <p className="mt-0.5 text-xs text-neutral-500">{t("configureJumpServerHint")}</p>
+                </div>
+                <Switch checked={form.configureJumpServer} onCheckedChange={(checked) => setForm({ ...form, configureJumpServer: checked })} />
+              </div>
               <Field label={t("leaseDurationDays")}>
                 <Input
                   value={form.leaseDurationDays}
@@ -455,7 +471,7 @@ export function AdminTicketActions({
                 !form.pveNodeId ||
                 !form.vmid ||
                 !form.internalIp ||
-                !form.securityGroup ||
+                (form.configureSecurityGroup && !form.securityGroup) ||
                 !form.leaseDurationDays ||
                 (form.externalEnabled && (
                   !form.subnetId ||
@@ -485,7 +501,9 @@ export function AdminTicketActions({
                     sshKeys: form.sshKeys,
                     nameserver: form.nameserver,
                     ipconfig: form.ipconfig,
+                    configureSecurityGroup: form.configureSecurityGroup,
                     securityGroup: form.securityGroup,
+                    configureJumpServer: form.configureJumpServer,
                     leaseDurationDays: Number(form.leaseDurationDays),
                     subnetId: form.subnetId || undefined,
                     externalAccess,
