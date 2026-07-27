@@ -1,0 +1,151 @@
+{
+  "formatVersion": 1,
+  "meta": {
+    "name": { "zh": "云资源申请", "en": "Cloud Resource Request" },
+    "description": {
+      "zh": "申请虚拟机或数据库资源，提交后将生成工单等待管理员审批。",
+      "en": "Request a VM or database resource. Submission creates a ticket for admin approval."
+    },
+    "defaultLocale": "zh"
+  },
+  "fields": [
+    {
+      "id": "student_id",
+      "type": "text",
+      "label": { "zh": "学号", "en": "Student ID" },
+      "required": true
+    },
+    {
+      "id": "resource_name",
+      "type": "text",
+      "label": { "zh": "资源名称/用途", "en": "Resource Name / Purpose" },
+      "required": true
+    },
+    {
+      "id": "resource_type",
+      "type": "dropdown",
+      "label": { "zh": "资源类型", "en": "Resource Type" },
+      "required": true,
+      "props": {
+        "options": [
+          { "value": "vm", "label": { "zh": "虚拟机", "en": "Virtual Machine" } },
+          { "value": "database", "label": { "zh": "数据库", "en": "Database" } }
+        ]
+      }
+    },
+    {
+      "id": "cpu_cores",
+      "type": "slider",
+      "label": { "zh": "CPU核心数", "en": "CPU Cores" },
+      "required": true,
+      "defaultValue": 2,
+      "props": { "min": 1, "max": 8, "step": 1, "unit": { "zh": "核", "en": "cores" } },
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "vm" }
+    },
+    {
+      "id": "ram_gb",
+      "type": "slider",
+      "label": { "zh": "内存大小", "en": "Memory Size" },
+      "required": true,
+      "defaultValue": 2,
+      "props": { "min": 1, "max": 16, "step": 1, "unit": { "zh": "GB", "en": "GB" } },
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "vm" }
+    },
+    {
+      "id": "disk_gb",
+      "type": "stepper",
+      "label": { "zh": "系统盘大小", "en": "System Disk Size" },
+      "required": true,
+      "defaultValue": 40,
+      "props": { "min": 10, "max": 200, "step": 10, "unit": { "zh": "GB", "en": "GB" } },
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "vm" }
+    },
+    {
+      "id": "os_type",
+      "type": "dropdown",
+      "label": { "zh": "系统类型", "en": "Operating System" },
+      "required": true,
+      "props": {
+        "options": [
+          { "value": "debian12", "label": { "zh": "Debian 12", "en": "Debian 12" } },
+          { "value": "debian13", "label": { "zh": "Debian 13", "en": "Debian 13" } },
+          { "value": "ubuntu2404", "label": { "zh": "Ubuntu Server 24.04 LTS", "en": "Ubuntu Server 24.04 LTS" } },
+          { "value": "rocky9", "label": { "zh": "Rocky Linux 9", "en": "Rocky Linux 9" } },
+          { "value": "alpine", "label": { "zh": "Alpine Linux", "en": "Alpine Linux" } }
+        ]
+      },
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "vm" }
+    },
+    {
+      "id": "need_external_net",
+      "type": "toggle",
+      "label": { "zh": "是否需访问外网", "en": "Needs Outbound Internet Access" },
+      "required": false,
+      "defaultValue": false,
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "vm" }
+    },
+    {
+      "id": "intranet_site",
+      "type": "toggle",
+      "label": { "zh": "是否需要校园网内网建站", "en": "Host a Website on the Campus Intranet" },
+      "required": false,
+      "defaultValue": false,
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "vm" }
+    },
+    {
+      "id": "intranet_domain",
+      "type": "text",
+      "label": { "zh": "内网建站域名", "en": "Intranet Site Domain" },
+      "hint": {
+        "zh": "填写横线处内容，可以为中文；如有使用自有域名的话请完整填写",
+        "en": "Fill in the blank (Chinese allowed). If using your own domain, enter it in full."
+      },
+      "required": true,
+      "props": { "suffix": ".personal.sxu-cnta.cn" },
+      "visibleWhen": {
+        "all": [
+          { "field": "resource_type", "operator": "equals", "value": "vm" },
+          { "field": "intranet_site", "operator": "isTrue" }
+        ]
+      }
+    },
+    {
+      "id": "forward_ports",
+      "type": "text",
+      "label": { "zh": "建站需转发的协议/端口", "en": "Protocol / Port to Forward" },
+      "hint": { "zh": "如 http 3000 端口", "en": "e.g., http, port 3000" },
+      "required": true,
+      "visibleWhen": {
+        "all": [
+          { "field": "resource_type", "operator": "equals", "value": "vm" },
+          { "field": "intranet_site", "operator": "isTrue" }
+        ]
+      }
+    },
+    {
+      "id": "public_site",
+      "type": "toggle",
+      "label": { "zh": "是否需要外网互联网建站", "en": "Host a Public Internet Website" },
+      "hint": { "zh": "需单独联系沟通", "en": "Requires separate discussion with an admin" },
+      "required": false,
+      "defaultValue": false,
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "vm" }
+    },
+    {
+      "id": "app_type",
+      "type": "dropdown",
+      "label": { "zh": "应用类型", "en": "Application Type" },
+      "hint": { "zh": "后续账号分配请联系管理员", "en": "Contact an admin afterwards for account assignment" },
+      "required": true,
+      "props": {
+        "options": [
+          { "value": "mysql", "label": { "zh": "MySQL", "en": "MySQL" } },
+          { "value": "postgresql", "label": { "zh": "PostgreSQL", "en": "PostgreSQL" } },
+          { "value": "redis", "label": { "zh": "Redis", "en": "Redis" } },
+          { "value": "mongodb", "label": { "zh": "MongoDB", "en": "MongoDB" } }
+        ]
+      },
+      "visibleWhen": { "field": "resource_type", "operator": "equals", "value": "database" }
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+# Cumulet — full stack (app + MySQL). Usage:
+#   1. cp .env.example .env  and set NEXTAUTH_SECRET + APP_ENCRYPTION_KEY
+#      (openssl rand -base64 32  /  openssl rand -hex 32)
+#   2. docker compose up -d --build
+#   3. first run only: SEED_ON_START=true docker compose up -d   (seeds admin+form)
+#
+# The MySQL 8.4 default auth plugin is caching_sha2_password, which Prisma
+# supports — no sha256_password pitfalls here.
+
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-cumulet}
+      MYSQL_USER: ${MYSQL_USER:-cumulet}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Not published by default — only the app needs it. Uncomment to inspect.
+    # ports:
+    #   - "3306:3306"
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "${DOCKER_DATABASE_URL:-mysql://${MYSQL_USER:-cumulet}:${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}@db:3306/${MYSQL_DATABASE:-cumulet}}"
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET in .env}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set APP_ENCRYPTION_KEY (64 hex chars) in .env}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      DEFAULT_LOCALE: ${DEFAULT_LOCALE:-zh}
+      AI_CRON_ENABLED: ${AI_CRON_ENABLED:-true}
+      LIFECYCLE_CRON_ENABLED: ${LIFECYCLE_CRON_ENABLED:-true}
+      ALLOW_PRIVATE_OUTBOUND_WEBHOOKS: ${ALLOW_PRIVATE_OUTBOUND_WEBHOOKS:-false}
+      # First-boot seeding (set to true once, then unset):
+      SEED_ON_START: ${SEED_ON_START:-false}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  db_data:

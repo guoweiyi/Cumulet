@@ -1,0 +1,761 @@
+// =============================================================================
+// 栖云 Cumulet — Prisma Schema
+// Self-service cloud console for Proxmox VE.
+// MySQL 8 · strict 3NF · all statuses/roles as enums.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  USER
+  AUDITOR
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum TicketStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PROVISIONING
+  ACTIVE
+  FAILED
+  CLOSED
+}
+
+enum FormSchemaStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum ProvisioningStepType {
+  VALIDATE_VMID
+  CLOUD_INIT
+  PVE_SECURITY_GROUP
+  EXTERNAL_ACCESS
+  JS_ASSET
+  JS_PERMISSION
+  NOTIFY
+}
+
+enum ProvisioningStepStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+enum SecurityGroupScope {
+  ADMIN_ONLY
+  SHARED
+}
+
+enum AiInspectionTrigger {
+  USER_ON_DEMAND
+  ADMIN_ON_DEMAND
+  SCHEDULED
+}
+
+enum AiInspectionStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+enum AiSeverity {
+  HEALTHY
+  WARNING
+  CRITICAL
+  UNKNOWN
+}
+
+enum ProviderType {
+  PROXMOX
+  ESXI
+  FNOS
+  AWS
+  CUSTOM
+}
+
+enum ProviderStatus {
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+enum ProvisionedResourceStatus {
+  PROVISIONING
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+  PENDING_DELETION
+  DELETED
+  FAILED
+}
+
+enum TenantMembershipRole {
+  MEMBER
+  MANAGER
+}
+
+enum NetworkStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum IpVersion {
+  IPV4
+  IPV6
+}
+
+enum ReverseProxyMode {
+  FRP_HTTP_API
+  FRPC_CONFIG
+}
+
+enum ExternalAccessProtocol {
+  TCP
+  HTTP
+  HTTPS
+}
+
+enum ExternalAccessStatus {
+  PENDING
+  ACTIVE
+  FAILED
+  DISABLED
+}
+
+enum DnsRecordType {
+  A
+  AAAA
+  CNAME
+}
+
+enum DnsSyncMode {
+  CONFIG_EXPORT
+  HTTP_API
+}
+
+enum DnsRecordStatus {
+  PENDING
+  ACTIVE
+  FAILED
+}
+
+enum WebhookEventType {
+  TICKET_STATUS_CHANGED
+  RESOURCE_PROVISIONED
+  RESOURCE_EXPIRED
+  RESOURCE_PENDING_DELETION
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERING
+  SUCCESS
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id              String    @id @default(cuid())
+  oidcSub         String?   @unique // null for pure email/password admins
+  email           String    @unique
+  nickname        String?   @db.VarChar(64)
+  realName        String?   @db.VarChar(64) // null until onboarding, then immutable (enforced at API layer)
+  realNameSetAt   DateTime?
+  role            Role      @default(USER)
+  preferredLocale String    @default("zh") @db.VarChar(8)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  adminCredential       AdminCredential?
+  quota                 UserQuota?
+  tickets               Ticket[]              @relation("TicketRequester")
+  decidedTickets        Ticket[]              @relation("TicketDecider")
+  ticketMessages        TicketMessage[]
+  boundBindings         ResourceBinding[]     @relation("BindingOperator")
+  createdFormSchemas    FormSchema[]
+  createdSecurityGroups SecurityGroup[]
+  updatedBaselines      VmFirewallBaseline[]
+  updatedSettings       SystemSetting[]
+  auditLogs             AuditLog[]
+  requestedInspections  AiInspectionLog[]
+  tenantMemberships     TenantMembership[]
+  ownedResources        ProvisionedResource[] @relation("ResourceOwner")
+  createdTenants        Tenant[]              @relation("TenantCreator")
+  createdNetworks       Network[]             @relation("NetworkCreator")
+  createdWebhooks       WebhookEndpoint[]     @relation("WebhookCreator")
+}
+
+// 1:1 with admin-capable users; passkeys hang off it 1:N (an admin can
+// register several authenticators — a strict 1:1 for WebAuthn would not work).
+model AdminCredential {
+  id               String    @id @default(cuid())
+  userId           String    @unique
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  passwordHash     String?   @db.VarChar(255) // argon2; null if passkey/OIDC-only admin
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  webAuthnCredentials WebAuthnCredential[]
+}
+
+model WebAuthnCredential {
+  id              String          @id // base64url credential ID from the authenticator
+  credentialId    String          @unique @db.VarChar(255)
+  adminCredId     String
+  adminCredential AdminCredential @relation(fields: [adminCredId], references: [id], onDelete: Cascade)
+  publicKey       Bytes
+  counter         BigInt          @default(0)
+  transports      String?         @db.VarChar(255) // comma-separated AuthenticatorTransport list
+  deviceType      String?         @db.VarChar(32)
+  backedUp        Boolean         @default(false)
+  label           String?         @db.VarChar(64) // user-given name, e.g. "MacBook Touch ID"
+  createdAt       DateTime        @default(now())
+  lastUsedAt      DateTime?
+
+  @@index([adminCredId])
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic forms (versioned; old submissions must survive new versions)
+// ---------------------------------------------------------------------------
+
+// A form is one portable, versioned JSON document (the canonical form-engine
+// definition: { formatVersion, meta, fields }). Self-contained — no DB ids or
+// timestamps inside — so export/import is lossless. Old tickets keep rendering
+// with the exact version they were submitted against.
+model FormSchema {
+  id          String           @id @default(cuid())
+  familyKey   String           @db.VarChar(64) // stable key grouping all versions of one form
+  version     Int
+  status      FormSchemaStatus @default(DRAFT)
+  definition  Json // canonical FormDefinition JSON (source of truth)
+  createdById String
+  createdBy   User             @relation(fields: [createdById], references: [id])
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  publishedAt DateTime?
+
+  tickets Ticket[]
+
+  @@unique([familyKey, version])
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------------
+// Ticketing
+// ---------------------------------------------------------------------------
+
+model Ticket {
+  id           String       @id @default(cuid())
+  userId       String
+  user         User         @relation("TicketRequester", fields: [userId], references: [id])
+  formSchemaId String // exact version the user submitted against
+  formSchema   FormSchema   @relation(fields: [formSchemaId], references: [id])
+  values       Json // snapshot of submitted values, keyed by fieldKey
+  status       TicketStatus @default(PENDING)
+  decidedById  String?
+  decidedBy    User?        @relation("TicketDecider", fields: [decidedById], references: [id])
+  decidedAt    DateTime?
+  closedAt     DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  messages         TicketMessage[]
+  binding          ResourceBinding?
+  resource         ProvisionedResource?
+  sourceInspection AiInspectionLog?     @relation("InspectionAlertTicket")
+
+  @@index([userId, status])
+  @@index([status, createdAt])
+}
+
+model TicketMessage {
+  id             String   @id @default(cuid())
+  ticketId       String
+  ticket         Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId       String? // null for system-generated events (rendered as badges)
+  author         User?    @relation(fields: [authorId], references: [id])
+  body           String   @db.Text
+  isInternalNote Boolean  @default(false) // admin-only visibility
+  isSystem       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// PVE infrastructure & resource bindings
+// ---------------------------------------------------------------------------
+
+model PveNode {
+  id                 String            @id @default(cuid())
+  name               String            @unique @db.VarChar(64) // display name, e.g. "AZ 1"
+  nodeName           String            @db.VarChar(64) // PVE node name, e.g. "cnta"
+  apiUrl             String            @db.VarChar(255)
+  tokenId            String            @db.VarChar(128)
+  tokenSecretEnc     String            @db.VarChar(512) // AES-256-GCM ciphertext
+  tlsVerify          Boolean           @default(true)
+  verified           Boolean           @default(false)
+  verifiedAt         DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  providerInstanceId String?           @unique
+  providerInstance   ProviderInstance? @relation(fields: [providerInstanceId], references: [id], onDelete: SetNull)
+
+  bindings ResourceBinding[]
+}
+
+model ResourceBinding {
+  id                         String              @id @default(cuid())
+  ticketId                   String              @unique
+  ticket                     Ticket              @relation(fields: [ticketId], references: [id])
+  pveNodeId                  String
+  pveNode                    PveNode             @relation(fields: [pveNodeId], references: [id])
+  vmid                       Int
+  internalIp                 String              @db.VarChar(45)
+  boundById                  String
+  boundBy                    User                @relation("BindingOperator", fields: [boundById], references: [id])
+  boundAt                    DateTime            @default(now())
+  cloudInitUser              String              @db.VarChar(32)
+  initialPasswordDeliveredAt DateTime?
+  provisionMeta              Json? // admin-supplied ipconfig0/nameserver/sshKeys captured at approve
+  pveSecurityGroup           String?             @db.VarChar(64) // group applied at provisioning
+  jsAssetId                  String?             @db.VarChar(64) // JumpServer asset UUID
+  jsPermissionId             String?             @db.VarChar(64) // JumpServer asset-permission UUID
+  resourceId                 String              @unique
+  resource                   ProvisionedResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  steps              ProvisioningStep[]
+  firewallBaseline   VmFirewallBaseline?
+  oneTimeCredentials OneTimeCredential[]
+  aiInspections      AiInspectionLog[]
+
+  @@unique([pveNodeId, vmid]) // one VM can only ever back one binding
+}
+
+model ProvisioningStep {
+  id           String                 @id @default(cuid())
+  bindingId    String
+  binding      ResourceBinding        @relation(fields: [bindingId], references: [id], onDelete: Cascade)
+  step         ProvisioningStepType
+  status       ProvisioningStepStatus @default(PENDING)
+  errorMessage String?                @db.Text
+  attempts     Int                    @default(0)
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+
+  @@unique([bindingId, step]) // per-step retry updates the same row
+}
+
+// One-time, see-exactly-once delivery of Cloud-Init credentials.
+// Token is stored hashed; payload is AES-256-GCM ciphertext, deleted on read.
+model OneTimeCredential {
+  id         String          @id @default(cuid())
+  tokenHash  String          @unique @db.VarChar(128)
+  bindingId  String
+  binding    ResourceBinding @relation(fields: [bindingId], references: [id], onDelete: Cascade)
+  payloadEnc String          @db.Text
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime        @default(now())
+
+  @@index([bindingId])
+}
+
+// ---------------------------------------------------------------------------
+// Quotas, security groups, firewall baselines
+// ---------------------------------------------------------------------------
+
+model UserQuota {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  maxCpuCores      Int
+  maxRamGB         Int
+  maxDiskGB        Int
+  maxFirewallRules Int
+  updatedAt        DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Provider abstraction and provider-neutral resource lifecycle
+// ---------------------------------------------------------------------------
+
+model ProviderInstance {
+  id         String         @id @default(cuid())
+  name       String         @unique @db.VarChar(96)
+  type       ProviderType
+  status     ProviderStatus @default(ACTIVE)
+  config     Json
+  secretEnc  String?        @db.Text
+  verifiedAt DateTime?
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  pveNode   PveNode?
+  resources ProvisionedResource[]
+
+  @@index([type, status])
+}
+
+model ProvisionedResource {
+  id                 String                    @id @default(cuid())
+  ticketId           String                    @unique
+  ticket             Ticket                    @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  ownerId            String
+  owner              User                      @relation("ResourceOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  providerId         String
+  provider           ProviderInstance          @relation(fields: [providerId], references: [id], onDelete: Restrict)
+  providerResourceId String                    @db.VarChar(128)
+  displayName        String                    @db.VarChar(128)
+  cpuCores           Int
+  ramGB              Int
+  diskGB             Int
+  internalIp         String?                   @db.VarChar(45)
+  status             ProvisionedResourceStatus @default(PROVISIONING)
+  leaseStartTime     DateTime
+  leaseDurationDays  Int
+  expiresAt          DateTime
+  warningSentAt      DateTime?
+  expiredAt          DateTime?
+  deletionDueAt      DateTime?
+  deletedAt          DateTime?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+
+  pveBinding         ResourceBinding?
+  networkAttachments ResourceNetworkAttachment[]
+  externalMappings   ExternalAccessMapping[]
+
+  @@unique([providerId, providerResourceId])
+  @@index([ownerId, status])
+  @@index([status, expiresAt])
+  @@index([status, deletionDueAt])
+}
+
+// ---------------------------------------------------------------------------
+// Tenants, isolated networks, reverse proxy, and split DNS
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id          String   @id @default(cuid())
+  slug        String   @unique @db.VarChar(64)
+  name        String   @db.VarChar(128)
+  createdById String?
+  createdBy   User?    @relation("TenantCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  memberships TenantMembership[]
+  networks    Network[]
+  gateways    ReverseProxyGateway[]
+  dnsZones    DnsZone[]
+  webhooks    WebhookEndpoint[]
+}
+
+model TenantMembership {
+  id        String               @id @default(cuid())
+  tenantId  String
+  tenant    Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      TenantMembershipRole @default(MEMBER)
+  createdAt DateTime             @default(now())
+
+  @@unique([tenantId, userId])
+  @@index([userId])
+}
+
+model Network {
+  id            String        @id @default(cuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String        @db.VarChar(96)
+  routingDomain String        @db.VarChar(96)
+  status        NetworkStatus @default(ACTIVE)
+  createdById   String?
+  createdBy     User?         @relation("NetworkCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  subnets Subnet[]
+
+  @@unique([tenantId, name])
+  @@unique([tenantId, routingDomain])
+}
+
+model Subnet {
+  id         String        @id @default(cuid())
+  networkId  String
+  network    Network       @relation(fields: [networkId], references: [id], onDelete: Cascade)
+  name       String        @db.VarChar(96)
+  cidr       String        @db.VarChar(64)
+  ipVersion  IpVersion     @default(IPV4)
+  gateway    String?       @db.VarChar(45)
+  dnsServers Json?
+  status     NetworkStatus @default(ACTIVE)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  attachments ResourceNetworkAttachment[]
+
+  @@unique([networkId, name])
+  @@unique([networkId, cidr])
+}
+
+model ResourceNetworkAttachment {
+  id         String              @id @default(cuid())
+  resourceId String
+  resource   ProvisionedResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  subnetId   String
+  subnet     Subnet              @relation(fields: [subnetId], references: [id], onDelete: Restrict)
+  ipAddress  String              @db.VarChar(45)
+  isPrimary  Boolean             @default(false)
+  createdAt  DateTime            @default(now())
+
+  @@unique([resourceId, subnetId])
+  @@unique([subnetId, ipAddress])
+  @@index([resourceId, isPrimary])
+}
+
+model ReverseProxyGateway {
+  id         String           @id @default(cuid())
+  tenantId   String?
+  tenant     Tenant?          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name       String           @db.VarChar(96)
+  mode       ReverseProxyMode
+  apiUrl     String?          @db.VarChar(512)
+  publicHost String           @db.VarChar(255)
+  secretEnc  String?          @db.Text
+  tlsVerify  Boolean          @default(true)
+  enabled    Boolean          @default(true)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  mappings ExternalAccessMapping[]
+
+  @@unique([tenantId, name])
+}
+
+model ExternalAccessMapping {
+  id              String                 @id @default(cuid())
+  automationKey   String?                @unique @db.VarChar(128)
+  resourceId      String
+  resource        ProvisionedResource    @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  gatewayId       String
+  gateway         ReverseProxyGateway    @relation(fields: [gatewayId], references: [id], onDelete: Restrict)
+  protocol        ExternalAccessProtocol
+  internalHost    String                 @db.VarChar(45)
+  internalPort    Int
+  externalPort    Int?
+  hostname        String?                @db.VarChar(255)
+  status          ExternalAccessStatus   @default(PENDING)
+  generatedConfig String?                @db.Text
+  lastError       String?                @db.Text
+  lastAppliedAt   DateTime?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  dnsRecords DnsRecord[]
+
+  @@unique([gatewayId, externalPort])
+  @@unique([gatewayId, hostname])
+  @@index([resourceId, status])
+}
+
+model DnsZone {
+  id           String      @id @default(cuid())
+  tenantId     String
+  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  domain       String      @db.VarChar(255)
+  mode         DnsSyncMode @default(CONFIG_EXPORT)
+  apiUrl       String?     @db.VarChar(512)
+  secretEnc    String?     @db.Text
+  tlsVerify    Boolean     @default(true)
+  lastSyncedAt DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  records DnsRecord[]
+
+  @@unique([tenantId, domain])
+}
+
+model DnsRecord {
+  id              String                 @id @default(cuid())
+  zoneId          String
+  zone            DnsZone                @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  mappingId       String?
+  mapping         ExternalAccessMapping? @relation(fields: [mappingId], references: [id], onDelete: SetNull)
+  hostname        String                 @db.VarChar(255)
+  type            DnsRecordType          @default(A)
+  internalValue   String                 @db.VarChar(255)
+  externalValue   String                 @db.VarChar(255)
+  ttl             Int                    @default(300)
+  status          DnsRecordStatus        @default(PENDING)
+  generatedConfig String?                @db.Text
+  lastError       String?                @db.Text
+  lastAppliedAt   DateTime?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@unique([zoneId, hostname, type])
+  @@index([mappingId])
+}
+
+// ---------------------------------------------------------------------------
+// Outbound webhook subscriptions and durable deliveries
+// ---------------------------------------------------------------------------
+
+model WebhookEndpoint {
+  id               String   @id @default(cuid())
+  tenantId         String?
+  tenant           Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name             String   @db.VarChar(96)
+  url              String   @db.VarChar(1024)
+  signingSecretEnc String?  @db.Text
+  events           Json
+  enabled          Boolean  @default(true)
+  createdById      String?
+  createdBy        User?    @relation("WebhookCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@unique([tenantId, name])
+  @@index([enabled])
+}
+
+model WebhookDelivery {
+  id             String                @id @default(cuid())
+  endpointId     String
+  endpoint       WebhookEndpoint       @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  eventId        String                @db.VarChar(64)
+  eventType      WebhookEventType
+  payload        Json
+  status         WebhookDeliveryStatus @default(PENDING)
+  attempts       Int                   @default(0)
+  nextAttemptAt  DateTime              @default(now())
+  responseStatus Int?
+  errorMessage   String?               @db.Text
+  deliveredAt    DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
+
+  @@unique([endpointId, eventId])
+  @@index([status, nextAttemptAt])
+}
+
+// Metadata/visibility layer over PVE cluster firewall groups.
+// PVE is the source of truth for the rules themselves.
+model SecurityGroup {
+  id                    String             @id @default(cuid())
+  name                  String             @unique @db.VarChar(64) // 1:1 with PVE group name
+  description           Json? // { zh: string, en?: string }
+  scope                 SecurityGroupScope @default(ADMIN_ONLY)
+  isProvisioningDefault Boolean            @default(false)
+  createdById           String?
+  createdBy             User?              @relation(fields: [createdById], references: [id])
+  lastSyncedAt          DateTime?
+  createdAt             DateTime           @default(now())
+}
+
+// Admin-enforced per-VM rules users cannot edit/remove; re-asserted on drift.
+model VmFirewallBaseline {
+  id          String          @id @default(cuid())
+  bindingId   String          @unique
+  binding     ResourceBinding @relation(fields: [bindingId], references: [id], onDelete: Cascade)
+  rules       Json // [{ direction, action, proto, dport, source, comment }]
+  updatedById String?
+  updatedBy   User?           @relation(fields: [updatedById], references: [id])
+  updatedAt   DateTime        @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Settings & audit
+// ---------------------------------------------------------------------------
+
+// Key/value store: SMTP, JumpServer config, default quotas, provisioning
+// defaults. Secret members inside `value` are stored as AES-256-GCM ciphertext.
+model SystemSetting {
+  key         String   @id @db.VarChar(64)
+  value       Json
+  updatedById String?
+  updatedBy   User?    @relation(fields: [updatedById], references: [id])
+  updatedAt   DateTime @updatedAt
+}
+
+// AI inspection output. Raw PVE logs are deliberately not persisted; only
+// bounded aggregate metrics and the structured model conclusion are stored.
+model AiInspectionLog {
+  id            String              @id @default(cuid())
+  bindingId     String
+  binding       ResourceBinding     @relation(fields: [bindingId], references: [id], onDelete: Cascade)
+  requestedById String?
+  requestedBy   User?               @relation(fields: [requestedById], references: [id], onDelete: SetNull)
+  trigger       AiInspectionTrigger
+  status        AiInspectionStatus  @default(RUNNING)
+  severity      AiSeverity          @default(UNKNOWN)
+  healthScore   Int?
+  modelName     String?             @db.VarChar(128)
+  metricSummary Json?
+  analysis      Json?
+  errorMessage  String?             @db.Text
+  alertTicketId String?             @unique
+  alertTicket   Ticket?             @relation("InspectionAlertTicket", fields: [alertTicketId], references: [id], onDelete: SetNull)
+  startedAt     DateTime            @default(now())
+  finishedAt    DateTime?
+  createdAt     DateTime            @default(now())
+
+  @@index([bindingId, createdAt])
+  @@index([status, severity, createdAt])
+}
+
+// Database-backed lease prevents duplicate scheduled inspections when more
+// than one application process is running.
+model JobLease {
+  key       String   @id @db.VarChar(64)
+  holderId  String   @db.VarChar(64)
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String? // null for system/pipeline actions
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     String   @db.VarChar(128) // e.g. "pve.firewall.rule.create"
+  targetType String?  @db.VarChar(64) // e.g. "ResourceBinding"
+  targetId   String?  @db.VarChar(64)
+  metadata   Json? // before/after diffs; secrets masked before writing
+  createdAt  DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}

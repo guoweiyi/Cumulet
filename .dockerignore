@@ -1,0 +1,22 @@
+node_modules
+.next
+.git
+.gitignore
+# Never bake host secrets into the image — runtime env comes from compose.
+.env
+.env.*
+!.env.example
+npm-debug.log*
+*.log
+.DS_Store
+README*.md
+SECURITY_AUDIT.md
+CONTRIBUTING*.md
+CODE_OF_CONDUCT.md
+.github
+.claude
+tests
+vitest.config.ts
+Dockerfile
+.dockerignore
+docker-compose.yml
