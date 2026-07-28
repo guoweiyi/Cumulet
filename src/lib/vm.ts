@@ -38,7 +38,11 @@ export async function vmContext(bindingId: string, opts?: { write?: boolean }): 
   return {
     binding: binding as VmContext["binding"],
     client: pveClient(binding.pveNode, user.id),
-    provider: await getHypervisorProvider(binding.resource.providerId, user.id),
+    provider: await getHypervisorProvider(
+      binding.resource.providerId,
+      user.id,
+      { allowInactive: !opts?.write },
+    ),
     userId: user.id,
     owner,
   };

@@ -63,20 +63,33 @@ async function expireResources(now: Date): Promise<{ expired: number; failures: 
   let expired = 0;
   let failures = 0;
   for (const resource of resources) {
+    // Entitlement revocation must not depend on the hypervisor being reachable.
+    // Mark expired first so portal/API access is denied at the deadline.
+    const updated = await prisma.provisionedResource.updateMany({
+      where: { id: resource.id, status: "ACTIVE" },
+      data: {
+        status: "EXPIRED",
+        expiredAt: now,
+        deletionDueAt: new Date(now.getTime() + 7 * DAY_MS),
+      },
+    });
+    if (!updated.count) continue;
+    expired += 1;
+
     try {
       const provider = await getHypervisorProvider(resource.providerId, null);
       await provider.shutdown({ providerResourceId: resource.providerResourceId });
-      const updated = await prisma.provisionedResource.updateMany({
-        where: { id: resource.id, status: "ACTIVE" },
-        data: {
-          status: "EXPIRED",
-          expiredAt: now,
-          deletionDueAt: new Date(now.getTime() + 7 * DAY_MS),
-        },
+    } catch (error) {
+      failures += 1;
+      await audit({
+        action: "resource.lease.shutdown_failed",
+        targetType: "ProvisionedResource",
+        targetId: resource.id,
+        metadata: { error: error instanceof Error ? error.message.slice(0, 200) : "provider_failed" },
       });
-      if (!updated.count) continue;
-      expired += 1;
-      await audit({ action: "resource.lease.expired", targetType: "ProvisionedResource", targetId: resource.id });
+    }
+    await audit({ action: "resource.lease.expired", targetType: "ProvisionedResource", targetId: resource.id });
+    try {
       const tenantIds = await tenantIdsForUser(resource.ownerId);
       await dispatchWebhookEvent({
         type: "RESOURCE_EXPIRED",
@@ -84,12 +97,11 @@ async function expireResources(now: Date): Promise<{ expired: number; failures: 
         data: { resourceId: resource.id, ownerId: resource.ownerId, expiredAt: now.toISOString() },
       });
     } catch (error) {
-      failures += 1;
       await audit({
-        action: "resource.lease.expiration_failed",
+        action: "resource.lease.expired_webhook_failed",
         targetType: "ProvisionedResource",
         targetId: resource.id,
-        metadata: { error: error instanceof Error ? error.message.slice(0, 200) : "provider_failed" },
+        metadata: { error: error instanceof Error ? error.message.slice(0, 200) : "webhook_failed" },
       });
     }
   }

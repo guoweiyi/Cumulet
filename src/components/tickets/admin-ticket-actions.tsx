@@ -204,7 +204,7 @@ export function AdminTicketActions({
           </Button>
         </>
       )}
-      {["PENDING", "APPROVED", "PROVISIONING", "FAILED"].includes(status) && (
+      {["PENDING", "APPROVED", "PROVISIONING", "FAILED"].includes(status) && !ticket.binding && (
         <Button
           size="sm"
           variant="ghost"
@@ -217,7 +217,9 @@ export function AdminTicketActions({
           {t("close")}
         </Button>
       )}
-      {status === "ACTIVE" && (
+      {(status === "ACTIVE" || (
+        ["APPROVED", "PROVISIONING", "FAILED"].includes(status) && ticket.binding
+      )) && (
         <Button size="sm" variant="outline" className="text-red-600" onClick={() => setDeprovOpen(true)}>
           <Trash2 className="size-4" /> {t("deprovision")}
         </Button>

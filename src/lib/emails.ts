@@ -107,8 +107,8 @@ export async function emailPasswordReset(userId: string, email: string, bindingL
   const subject = l === "zh" ? "服务器密码已重置" : "Server password was reset";
   const body =
     l === "zh"
-      ? `<p>您的服务器 ${escapeHtml(bindingLabel)} 的系统密码已重置，重启后生效。新密码已在控制台展示（仅一次）。</p>`
-      : `<p>The OS password of your server ${escapeHtml(bindingLabel)} was reset (effective after reboot). The new password was shown once in the console.</p>`;
+      ? `<p>您的服务器 ${escapeHtml(bindingLabel)} 的系统密码已通过 Guest Agent 立即重置，无需重启。新密码已在控制台展示（仅一次）。</p>`
+      : `<p>The OS password of your server ${escapeHtml(bindingLabel)} was reset immediately through the guest agent. The new password was shown once in the console.</p>`;
   await sendMail(email, subject, layout(subject, body));
 }
 

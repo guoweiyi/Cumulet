@@ -13,7 +13,10 @@ export default async function ServersPage() {
   const locale = await getLocale();
 
   const bindings = await prisma.resourceBinding.findMany({
-    where: { ticket: { userId: user.id } },
+    where: {
+      ticket: { userId: user.id, status: "ACTIVE" },
+      resource: { status: "ACTIVE" },
+    },
     orderBy: { boundAt: "desc" },
     include: {
       pveNode: { select: { name: true } },

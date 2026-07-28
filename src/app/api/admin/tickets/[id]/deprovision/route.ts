@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { api, badRequest, json, notFound } from "@/lib/api";
+import { api, badRequest, json, notFound, ApiError } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { requireAdminWrite } from "@/lib/guards";
 import { audit } from "@/lib/audit";
@@ -38,6 +38,29 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   const cleanup: Record<string, string> = {};
 
   if (binding) {
+    const applyingChange = await prisma.resourceResizeRequest.findFirst({
+      where: { resource: { ticketId: id }, status: "APPLYING" },
+      select: { id: true },
+    });
+    if (applyingChange) throw badRequest("resource_change_applying");
+
+    // Revoke portal management immediately, even if an external cleanup must be retried.
+    await prisma.$transaction([
+      prisma.provisionedResource.updateMany({
+        where: { ticketId: id, status: { notIn: ["DELETED", "PENDING_DELETION"] } },
+        data: { status: "SUSPENDED" },
+      }),
+      prisma.resourceResizeRequest.updateMany({
+        where: { resource: { ticketId: id }, status: "PENDING" },
+        data: {
+          status: "REJECTED",
+          decidedById: user.id,
+          decidedAt: new Date(),
+          decisionReason: "Resource deprovisioned",
+        },
+      }),
+    ]);
+
     try {
       const mappings = await prisma.externalAccessMapping.findMany({
         where: { resource: { ticketId: id } },
@@ -47,13 +70,28 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
     } catch (err) {
       cleanup.externalAccess = err instanceof Error ? err.message : "failed";
     }
-    // JumpServer permission + asset
-    try {
-      const js = await jumpServerClient(user.id);
-      if (binding.jsPermissionId) await js.deleteAssetPermission(binding.jsPermissionId);
-      if (removeAsset && binding.jsAssetId) await js.deleteHost(binding.jsAssetId);
-    } catch (err) {
-      cleanup.jumpserver = err instanceof Error ? err.message : "failed";
+    // Permission revocation is security-critical. Persist each successful
+    // cleanup immediately so retries are idempotent.
+    if (binding.jsPermissionId || (removeAsset && binding.jsAssetId)) {
+      try {
+        const js = await jumpServerClient(user.id);
+        if (binding.jsPermissionId) {
+          await js.deleteAssetPermission(binding.jsPermissionId);
+          await prisma.resourceBinding.update({
+            where: { id: binding.id },
+            data: { jsPermissionId: null },
+          });
+        }
+        if (removeAsset && binding.jsAssetId) {
+          await js.deleteHost(binding.jsAssetId);
+          await prisma.resourceBinding.update({
+            where: { id: binding.id },
+            data: { jsAssetId: null },
+          });
+        }
+      } catch (err) {
+        cleanup.jumpserverPermission = err instanceof Error ? err.message : "failed";
+      }
     }
     // Detach PVE security group
     try {
@@ -66,13 +104,16 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
     } catch (err) {
       cleanup.pve = err instanceof Error ? err.message : "failed";
     }
-    await prisma.resourceBinding.update({
-      where: { id: binding.id },
-      data: {
-        jsPermissionId: null,
-        ...(removeAsset ? { jsAssetId: null } : {}),
-      },
-    });
+    if (cleanup.externalAccess || cleanup.jumpserverPermission) {
+      await audit({
+        actorId: user.id,
+        action: "ticket.deprovision_blocked",
+        targetType: "Ticket",
+        targetId: id,
+        metadata: { cleanup },
+      });
+      throw new ApiError(502, "deprovision_cleanup_failed");
+    }
   }
 
   const now = new Date();

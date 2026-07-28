@@ -52,6 +52,14 @@ export type VmStatusPayload = {
   config: { cores: number; memoryMb: number; diskGb: number; diskKey: string | null; ciUser: string };
   firewallEnabled: boolean;
   quota: { maxCpuCores: number; maxRamGB: number; maxDiskGB: number; maxFirewallRules: number };
+  resizeRequest: {
+    id: string;
+    status: "PENDING" | "APPLYING";
+    requestedCpuCores: number;
+    requestedRamGB: number;
+    requestedDiskGB: number;
+    createdAt: string;
+  } | null;
 };
 
 export function VmPanel({
@@ -244,7 +252,7 @@ export function VmPanel({
               <Card>
                 <CardHeader className="flex-row items-center justify-between">
                   <CardTitle className="text-sm text-neutral-500">{t("configuration")}</CardTitle>
-                  {data && (
+                  {data && !data.resizeRequest && (
                     <ResizeDialog
                       bindingId={binding.id}
                       current={{ cores: data.config.cores, ramMb: data.config.memoryMb, diskGb: data.config.diskGb }}
@@ -252,10 +260,24 @@ export function VmPanel({
                       onDone={load}
                     />
                   )}
+                  {data?.resizeRequest && (
+                    <Badge variant="secondary" className="bg-amber-50 text-amber-700">
+                      {t("resizePending")}
+                    </Badge>
+                  )}
                 </CardHeader>
                 <CardContent className="space-y-3">
                   {data ? (
                     <>
+                      {data.resizeRequest && (
+                        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          {t("resizePendingDetail", {
+                            cpu: data.resizeRequest.requestedCpuCores,
+                            ram: data.resizeRequest.requestedRamGB,
+                            disk: data.resizeRequest.requestedDiskGB,
+                          })}
+                        </p>
+                      )}
                       <QuotaBar
                         icon={<HardDrive className="size-3.5" />}
                         label={`${t("cpu")} ${data.config.cores} ${t("cores")}`}

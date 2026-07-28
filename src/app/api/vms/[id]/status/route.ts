@@ -1,6 +1,7 @@
 import { api, json } from "@/lib/api";
 import { findBootDisk, mapPveError, vmContext } from "@/lib/vm";
 import { getUserQuota } from "@/lib/quota";
+import { prisma } from "@/lib/prisma";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -9,10 +10,22 @@ export const GET = api<Ctx>(async (_req, ctx) => {
   const { id } = await ctx.params;
   const { binding, client } = await vmContext(id);
   try {
-    const [status, config, fwOptions] = await Promise.all([
+    const [status, config, fwOptions, resizeRequest] = await Promise.all([
       client.vmStatus(binding.vmid),
       client.vmConfig(binding.vmid),
       client.getVmFirewallOptions(binding.vmid).catch(() => ({ enable: 0 })),
+      prisma.resourceResizeRequest.findFirst({
+        where: { resourceId: binding.resourceId, status: { in: ["PENDING", "APPLYING"] } },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          status: true,
+          requestedCpuCores: true,
+          requestedRamGB: true,
+          requestedDiskGB: true,
+          createdAt: true,
+        },
+      }),
     ]);
     const disk = findBootDisk(config);
     const quota = await getUserQuota(binding.ticket.userId);
@@ -37,6 +50,7 @@ export const GET = api<Ctx>(async (_req, ctx) => {
       },
       firewallEnabled: fwOptions.enable === 1,
       quota,
+      resizeRequest,
     });
   } catch (err) {
     mapPveError(err);

@@ -6,7 +6,10 @@ import { requireUser } from "@/lib/guards";
 export const GET = api(async () => {
   const user = await requireUser();
   const bindings = await prisma.resourceBinding.findMany({
-    where: { ticket: { userId: user.id } },
+    where: {
+      ticket: { userId: user.id, status: "ACTIVE" },
+      resource: { status: "ACTIVE" },
+    },
     orderBy: { boundAt: "desc" },
     select: {
       id: true,

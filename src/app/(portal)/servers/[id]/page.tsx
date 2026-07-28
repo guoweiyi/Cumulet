@@ -10,7 +10,11 @@ export default async function ServerDetailPage({ params }: { params: Promise<{ i
 
   // Strict ownership at the page level (admins use /admin/resources instead).
   const binding = await prisma.resourceBinding.findFirst({
-    where: { id, ticket: { userId: user.id } },
+    where: {
+      id,
+      ticket: { userId: user.id, status: "ACTIVE" },
+      resource: { status: "ACTIVE" },
+    },
     include: {
       pveNode: { select: { name: true } },
       ticket: { select: { status: true, id: true } },

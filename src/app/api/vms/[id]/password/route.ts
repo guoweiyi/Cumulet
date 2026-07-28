@@ -1,17 +1,14 @@
-import { api, forbidden, json } from "@/lib/api";
+import { api, forbidden, json, ApiError } from "@/lib/api";
 import { audit } from "@/lib/audit";
 import { emailPasswordReset } from "@/lib/emails";
 import { prisma } from "@/lib/prisma";
 import { LIMITS, rateLimit } from "@/lib/rate-limit";
+import { PveError } from "@/lib/pve";
 import { generateVmPassword, mapPveError, vmContext } from "@/lib/vm";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-/**
- * Owner-triggered Cloud-Init password reset. The new password is returned
- * exactly once in this response (over the authenticated session) and is
- * never persisted in plaintext or logged.
- */
+/** Reset an existing Linux account through QEMU Guest Agent. */
 export const POST = api<Ctx>(async (_req, ctx) => {
   const { id } = await ctx.params;
   const { binding, client, userId, owner } = await vmContext(id, { write: true });
@@ -20,9 +17,14 @@ export const POST = api<Ctx>(async (_req, ctx) => {
 
   const password = generateVmPassword();
   try {
-    await client.setConfig(binding.vmid, { cipassword: password });
-    await client.regenerateCloudInit(binding.vmid);
+    await client.setLinuxGuestPassword(binding.vmid, binding.cloudInitUser, password);
   } catch (err) {
+    if (err instanceof PveError && err.status === 409) {
+      throw new ApiError(409, "vm_not_running");
+    }
+    if (err instanceof PveError && err.path?.includes("/agent/")) {
+      throw new ApiError(409, "guest_agent_unavailable");
+    }
     mapPveError(err);
   }
 
@@ -36,5 +38,5 @@ export const POST = api<Ctx>(async (_req, ctx) => {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (user) void emailPasswordReset(user.id, user.email, `VM ${binding.vmid}`);
 
-  return json({ password, rebootRequired: true });
+  return json({ password, rebootRequired: false });
 });

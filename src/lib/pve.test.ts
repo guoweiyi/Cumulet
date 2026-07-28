@@ -4,6 +4,7 @@ import {
   ipFromCloudInitDump,
   ipFromLxcConfig,
   ipFromVmConfig,
+  guestPasswordInput,
   isPrivateIpv4,
   selectGuestIp,
   selectLxcIp,
@@ -49,5 +50,17 @@ describe("PVE guest IP selection", () => {
   it("reads LXC runtime and static config addresses", () => {
     expect(selectLxcIp([{ name: "eth0", inet: "10.0.5.8/24" }])).toBe("10.0.5.8");
     expect(ipFromLxcConfig({ net0: "name=eth0,bridge=vmbr0,ip=10.0.5.9/24,type=veth" })).toBe("10.0.5.9");
+  });
+});
+
+describe("PVE guest password input", () => {
+  it("passes credentials through stdin without shell interpolation", () => {
+    expect(guestPasswordInput("ubuntu", "aB3!$(touch nope)").toString("utf8"))
+      .toBe("ubuntu:aB3!$(touch nope)\n");
+  });
+
+  it("rejects record separators and invalid account names", () => {
+    expect(() => guestPasswordInput("root:other", "password")).toThrow();
+    expect(() => guestPasswordInput("ubuntu", "password\nroot:hijacked")).toThrow();
   });
 });

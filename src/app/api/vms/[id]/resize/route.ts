@@ -1,9 +1,9 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
-import { api, badRequest, json, ApiError } from "@/lib/api";
+import { api, badRequest, forbidden, json, ApiError } from "@/lib/api";
 import { audit } from "@/lib/audit";
-import { getUserQuota } from "@/lib/quota";
-import { findBootDisk, mapProviderError, vmContext } from "@/lib/vm";
+import { assertResizeWithinQuota } from "@/lib/quota";
+import { findBootDisk, mapPveError, vmContext } from "@/lib/vm";
 import { prisma } from "@/lib/prisma";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -12,60 +12,67 @@ const resizeSchema = z.object({
   cores: z.number().int().min(1).max(128),
   ramMb: z.number().int().min(512).max(1024 * 1024),
   diskGb: z.number().int().min(1).max(65536),
+  reason: z.string().trim().max(1000).optional(),
 });
 
-/**
- * Reconfigure CPU/RAM (hotplug where possible) and grow the disk.
- * Quota-enforced server-side against the RESOURCE OWNER's quota; disk can
- * never shrink (409). Over-quota requests are rejected with guidance.
- */
+/** Submit a resource change for administrator approval; this never mutates PVE. */
 export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   const { id } = await ctx.params;
-  const { binding, client, provider, userId, owner } = await vmContext(id, { write: true });
+  const { binding, client, userId, owner } = await vmContext(id, { write: true });
+  if (!owner) throw forbidden();
 
   const parsed = resizeSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) throw badRequest("invalid_resize");
-  const { cores, ramMb, diskGb } = parsed.data;
-
-  // Quota is checked against the owner's quota even when an admin resizes.
-  if (owner) {
-    const quota = await getUserQuota(binding.ticket.userId);
-    if (cores > quota.maxCpuCores || ramMb > quota.maxRamGB * 1024 || diskGb > quota.maxDiskGB) {
-      throw new ApiError(422, "over_quota");
-    }
-  }
+  const { cores, ramMb, diskGb, reason } = parsed.data;
+  const ramGB = Math.ceil(ramMb / 1024);
 
   try {
     const config = await client.vmConfig(binding.vmid);
     const disk = findBootDisk(config);
-    const currentCores = Number(config.cores ?? 1);
-    const currentRam = Number(config.memory ?? 0);
-
-    await provider.resize({
-      providerResourceId: binding.resource.providerResourceId,
+    const current = {
+      cpuCores: Number(config.cores ?? 1),
+      ramGB: Math.max(1, Math.ceil(Number(config.memory ?? 1024) / 1024)),
+      diskGB: disk?.sizeGb || 0,
+    };
+    if (diskGb < current.diskGB) throw new ApiError(409, "disk_shrink_forbidden");
+    if (cores === current.cpuCores && ramGB === current.ramGB && diskGb === current.diskGB) {
+      throw new ApiError(409, "resize_unchanged");
+    }
+    await assertResizeWithinQuota(binding.ticket.userId, binding.resourceId, {
       cpuCores: cores,
-      ramGB: Math.ceil(ramMb / 1024),
+      ramGB,
       diskGB: diskGb,
     });
-    const rebootRequired = cores !== currentCores || ramMb !== currentRam;
-    await prisma.provisionedResource.update({
-      where: { id: binding.resourceId },
-      data: { cpuCores: cores, ramGB: Math.ceil(ramMb / 1024), diskGB: diskGb },
-    });
 
-    await audit({
-      actorId: userId,
-      action: "vm.resize",
-      targetType: "ResourceBinding",
-      targetId: binding.id,
-      metadata: {
-        vmid: binding.vmid,
-        before: { cores: currentCores, ramMb: currentRam, diskGb: disk?.sizeGb },
-        after: { cores, ramMb, diskGb },
+    const pending = await prisma.resourceResizeRequest.findFirst({
+      where: { resourceId: binding.resourceId, status: { in: ["PENDING", "APPLYING"] } },
+      select: { id: true },
+    });
+    if (pending) throw new ApiError(409, "resize_already_pending");
+
+    const change = await prisma.resourceResizeRequest.create({
+      data: {
+        resourceId: binding.resourceId,
+        requestedById: userId,
+        beforeCpuCores: current.cpuCores,
+        beforeRamGB: current.ramGB,
+        beforeDiskGB: current.diskGB,
+        requestedCpuCores: cores,
+        requestedRamGB: ramGB,
+        requestedDiskGB: diskGb,
+        reason: reason || null,
       },
     });
-    return json({ ok: true, rebootRequired });
+    await audit({
+      actorId: userId,
+      action: "vm.resize.requested",
+      targetType: "ResourceResizeRequest",
+      targetId: change.id,
+      metadata: { resourceId: binding.resourceId, before: current, after: { cores, ramGB, diskGb } },
+    });
+    return json({ ok: true, requestId: change.id, status: change.status }, 202);
   } catch (err) {
-    mapProviderError(err);
+    if (err instanceof ApiError) throw err;
+    mapPveError(err);
   }
 });

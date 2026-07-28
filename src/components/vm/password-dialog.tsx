@@ -29,7 +29,15 @@ export function PasswordResetDialog({ bindingId }: { bindingId: string }) {
         return;
       }
       if (!res.ok) {
-        toast.error(tc("requestFailed"));
+        const body = await res.json().catch(() => null);
+        const code = body?.error?.code;
+        toast.error(
+          code === "vm_not_running"
+            ? t("passwordVmStopped")
+            : code === "guest_agent_unavailable"
+              ? t("passwordAgentUnavailable")
+              : tc("requestFailed"),
+        );
         return;
       }
       const data = await res.json();

@@ -66,6 +66,37 @@ const COUNTED_STATUSES = [
   "PENDING_DELETION",
 ] as const;
 
+/** Validate a replacement size against the user's aggregate allocation. */
+export async function assertResizeWithinQuota(
+  userId: string,
+  resourceId: string,
+  requested: ResourceCapacity,
+): Promise<void> {
+  const [quota, usage] = await Promise.all([
+    getUserQuota(userId),
+    prisma.provisionedResource.aggregate({
+      where: {
+        ownerId: userId,
+        id: { not: resourceId },
+        status: { in: [...COUNTED_STATUSES] },
+      },
+      _sum: { cpuCores: true, ramGB: true, diskGB: true },
+    }),
+  ]);
+  const total = {
+    cpuCores: (usage._sum.cpuCores ?? 0) + requested.cpuCores,
+    ramGB: (usage._sum.ramGB ?? 0) + requested.ramGB,
+    diskGB: (usage._sum.diskGB ?? 0) + requested.diskGB,
+  };
+  if (
+    total.cpuCores > quota.maxCpuCores ||
+    total.ramGB > quota.maxRamGB ||
+    total.diskGB > quota.maxDiskGB
+  ) {
+    throw new ApiError(422, "over_quota", JSON.stringify({ quota, usage: total }));
+  }
+}
+
 /** Aggregate allocations and reject an approval that would exceed quota. */
 export async function assertQuotaAvailable(
   tx: Prisma.TransactionClient,

@@ -41,6 +41,23 @@ export type VmCurrentStatus = {
   qmpstatus?: string;
 };
 
+export type PveGuestExecStatus = {
+  exited?: boolean | number;
+  exitcode?: number;
+  "out-data"?: string;
+  "err-data"?: string;
+};
+
+export function guestPasswordInput(username: string, password: string): Buffer {
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(username)) {
+    throw new PveError(400, "Invalid Linux guest username");
+  }
+  if (password.includes("\n") || password.includes("\r") || password.includes("\0")) {
+    throw new PveError(400, "Invalid guest password");
+  }
+  return Buffer.from(`${username}:${password}\n`, "utf8");
+}
+
 export class PveClient {
   private base: string;
   private authHeader: string;
@@ -152,6 +169,56 @@ export class PveClient {
       `/nodes/${this.node.nodeName}/qemu/${vmid}/agent/network-get-interfaces`,
     );
     return Array.isArray(response) ? response : response?.result ?? [];
+  }
+
+  async guestExec(vmid: number, command: string[], input?: Buffer): Promise<number> {
+    const response = await this.request<{ pid?: number } | number>(
+      "POST",
+      `/nodes/${this.node.nodeName}/qemu/${vmid}/agent/exec`,
+      {
+        command: JSON.stringify(command),
+        "input-data": input?.toString("base64"),
+        "capture-output": 1,
+      },
+    );
+    const pid = typeof response === "number" ? response : response?.pid;
+    if (!Number.isInteger(pid)) {
+      throw new PveError(502, "PVE guest agent returned an invalid process id");
+    }
+    return pid as number;
+  }
+
+  guestExecStatus(vmid: number, pid: number): Promise<PveGuestExecStatus> {
+    return this.request(
+      "GET",
+      `/nodes/${this.node.nodeName}/qemu/${vmid}/agent/exec-status?pid=${pid}`,
+    );
+  }
+
+  /** Change an existing Linux guest account password through QEMU Guest Agent. */
+  async setLinuxGuestPassword(vmid: number, username: string, password: string): Promise<void> {
+    const state = await this.vmStatus(vmid);
+    if (state.status !== "running") {
+      throw new PveError(409, "The VM must be running to reset its OS password");
+    }
+    const pid = await this.guestExec(
+      vmid,
+      ["/usr/sbin/chpasswd"],
+      guestPasswordInput(username, password),
+    );
+    const deadline = Date.now() + TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const status = await this.guestExecStatus(vmid, pid);
+      if (status.exited === 1 || status.exited === true) {
+        if (status.exitcode !== 0) {
+          const detail = status["err-data"] || status["out-data"] || "chpasswd failed";
+          throw new PveError(502, `Guest password reset failed: ${detail.slice(0, 300)}`);
+        }
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new PveError(504, "Timed out waiting for the guest password reset");
   }
 
   lxcConfig(vmid: number): Promise<Record<string, string | number>> {

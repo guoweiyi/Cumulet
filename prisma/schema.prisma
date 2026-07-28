@@ -106,6 +106,14 @@ enum ProvisionedResourceStatus {
   FAILED
 }
 
+enum ResourceChangeStatus {
+  PENDING
+  APPLYING
+  APPLIED
+  REJECTED
+  FAILED
+}
+
 enum TenantMembershipRole {
   MEMBER
   MANAGER
@@ -186,23 +194,25 @@ model User {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  adminCredential       AdminCredential?
-  quota                 UserQuota?
-  tickets               Ticket[]              @relation("TicketRequester")
-  decidedTickets        Ticket[]              @relation("TicketDecider")
-  ticketMessages        TicketMessage[]
-  boundBindings         ResourceBinding[]     @relation("BindingOperator")
-  createdFormSchemas    FormSchema[]
-  createdSecurityGroups SecurityGroup[]
-  updatedBaselines      VmFirewallBaseline[]
-  updatedSettings       SystemSetting[]
-  auditLogs             AuditLog[]
-  requestedInspections  AiInspectionLog[]
-  tenantMemberships     TenantMembership[]
-  ownedResources        ProvisionedResource[] @relation("ResourceOwner")
-  createdTenants        Tenant[]              @relation("TenantCreator")
-  createdNetworks       Network[]             @relation("NetworkCreator")
-  createdWebhooks       WebhookEndpoint[]     @relation("WebhookCreator")
+  adminCredential          AdminCredential?
+  quota                    UserQuota?
+  tickets                  Ticket[]                @relation("TicketRequester")
+  decidedTickets           Ticket[]                @relation("TicketDecider")
+  ticketMessages           TicketMessage[]
+  boundBindings            ResourceBinding[]       @relation("BindingOperator")
+  createdFormSchemas       FormSchema[]
+  createdSecurityGroups    SecurityGroup[]
+  updatedBaselines         VmFirewallBaseline[]
+  updatedSettings          SystemSetting[]
+  auditLogs                AuditLog[]
+  requestedInspections     AiInspectionLog[]
+  tenantMemberships        TenantMembership[]
+  ownedResources           ProvisionedResource[]   @relation("ResourceOwner")
+  createdTenants           Tenant[]                @relation("TenantCreator")
+  createdNetworks          Network[]               @relation("NetworkCreator")
+  createdWebhooks          WebhookEndpoint[]       @relation("WebhookCreator")
+  requestedResourceChanges ResourceResizeRequest[] @relation("ResizeRequester")
+  decidedResourceChanges   ResourceResizeRequest[] @relation("ResizeDecider")
 }
 
 // 1:1 with admin-capable users; passkeys hang off it 1:N (an admin can
@@ -450,11 +460,40 @@ model ProvisionedResource {
   pveBinding         ResourceBinding?
   networkAttachments ResourceNetworkAttachment[]
   externalMappings   ExternalAccessMapping[]
+  resizeRequests     ResourceResizeRequest[]
 
   @@unique([providerId, providerResourceId])
   @@index([ownerId, status])
   @@index([status, expiresAt])
   @@index([status, deletionDueAt])
+}
+
+model ResourceResizeRequest {
+  id                String               @id @default(cuid())
+  resourceId        String
+  resource          ProvisionedResource  @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  requestedById     String
+  requestedBy       User                 @relation("ResizeRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+  decidedById       String?
+  decidedBy         User?                @relation("ResizeDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+  status            ResourceChangeStatus @default(PENDING)
+  beforeCpuCores    Int
+  beforeRamGB       Int
+  beforeDiskGB      Int
+  requestedCpuCores Int
+  requestedRamGB    Int
+  requestedDiskGB   Int
+  reason            String?              @db.Text
+  decisionReason    String?              @db.Text
+  errorMessage      String?              @db.Text
+  createdAt         DateTime             @default(now())
+  decidedAt         DateTime?
+  appliedAt         DateTime?
+  updatedAt         DateTime             @updatedAt
+
+  @@index([status, createdAt])
+  @@index([resourceId, status])
+  @@index([requestedById, createdAt])
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { api, json, notFound } from "@/lib/api";
+import { api, badRequest, json, notFound } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { requireAdminWrite } from "@/lib/guards";
 import { audit } from "@/lib/audit";
@@ -13,10 +13,15 @@ export const POST = api<Ctx>(async (_req, ctx) => {
   const { id } = await ctx.params;
   const ticket = await prisma.ticket.findUnique({
     where: { id },
-    include: { user: true, sourceInspection: { select: { id: true } } },
+    include: {
+      user: true,
+      sourceInspection: { select: { id: true } },
+      binding: { select: { id: true } },
+    },
   });
   if (!ticket) throw notFound();
   assertTransition(ticket.status, "CLOSED");
+  if (ticket.binding) throw badRequest("bound_resource_requires_deprovision");
 
   await prisma.$transaction([
     prisma.ticket.update({ where: { id }, data: { status: "CLOSED", closedAt: new Date() } }),

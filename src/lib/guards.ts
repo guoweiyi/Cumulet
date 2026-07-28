@@ -3,6 +3,7 @@ import type { Role } from "@prisma/client";
 import { auth, ADMIN_ROLES } from "@/auth";
 import { prisma } from "./prisma";
 import { forbidden, notFound, unauthorized } from "./api";
+import { isUserManageableResource } from "./resource-access";
 
 export type CurrentUser = {
   id: string;
@@ -92,6 +93,12 @@ export async function requireBindingAccess(bindingId: string, opts?: { write?: b
   const owner = binding.ticket.userId === user.id;
   if (!owner) {
     if (!isAdminRole(user.role)) throw notFound();
+  } else if (
+    !isAdminRole(user.role) &&
+    !isUserManageableResource(binding.ticket.status, binding.resource.status)
+  ) {
+    // Closed/expired/deleted resources remain visible in ticket history only.
+    throw notFound();
   }
   return { user, binding, owner };
 }

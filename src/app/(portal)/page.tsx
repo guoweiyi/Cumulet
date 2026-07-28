@@ -23,7 +23,10 @@ export default async function DashboardPage() {
 
   const [bindings, openTickets] = await Promise.all([
     prisma.resourceBinding.findMany({
-      where: { ticket: { userId: user.id } },
+      where: {
+        ticket: { userId: user.id, status: "ACTIVE" },
+        resource: { status: "ACTIVE" },
+      },
       include: { ticket: true, pveNode: { select: { name: true } } },
       orderBy: { boundAt: "desc" },
       take: 8,

@@ -30,9 +30,17 @@ export const PATCH = api<Ctx>(async (req: NextRequest, ctx) => {
   const { id } = await ctx.params;
   const parsed = schema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) throw badRequest("invalid_lease");
-  const resource = await prisma.provisionedResource.findUnique({ where: { id } });
+  const resource = await prisma.provisionedResource.findUnique({
+    where: { id },
+    include: { ticket: { select: { status: true } } },
+  });
   if (!resource) throw notFound();
-  if (["DELETED", "PENDING_DELETION"].includes(resource.status)) throw badRequest("resource_not_renewable");
+  if (
+    resource.ticket.status !== "ACTIVE" ||
+    !["ACTIVE", "EXPIRED"].includes(resource.status)
+  ) {
+    throw badRequest("resource_not_renewable");
+  }
   const leaseStartTime = new Date();
   const expiresAt = new Date(leaseStartTime.getTime() + parsed.data.leaseDurationDays * 24 * 60 * 60 * 1000);
   const updated = await prisma.provisionedResource.update({
@@ -44,7 +52,7 @@ export const PATCH = api<Ctx>(async (req: NextRequest, ctx) => {
       warningSentAt: null,
       expiredAt: null,
       deletionDueAt: null,
-      status: resource.status === "ACTIVE" ? "ACTIVE" : "SUSPENDED",
+      status: "ACTIVE",
     },
   });
   await audit({
