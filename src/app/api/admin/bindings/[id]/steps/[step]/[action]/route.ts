@@ -1,7 +1,7 @@
 import { api, badRequest, json, notFound } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { requireAdminWrite } from "@/lib/guards";
-import { retryStep, skipStep, STEP_ORDER } from "@/lib/pipeline";
+import { retryStep, skipStep } from "@/lib/pipeline";
 import type { ProvisioningStepType } from "@prisma/client";
 
 type Ctx = { params: Promise<{ id: string; step: string; action: string }> };
@@ -10,11 +10,12 @@ type Ctx = { params: Promise<{ id: string; step: string; action: string }> };
 export const POST = api<Ctx>(async (_req, ctx) => {
   const user = await requireAdminWrite();
   const { id, step, action } = await ctx.params;
-  if (!STEP_ORDER.includes(step as ProvisioningStepType)) throw badRequest("invalid_step");
   if (action !== "retry" && action !== "skip") throw badRequest("invalid_action");
 
-  const binding = await prisma.resourceBinding.findUnique({ where: { id } });
-  if (!binding) throw notFound();
+  const bindingStep = await prisma.provisioningStep.findUnique({
+    where: { bindingId_step: { bindingId: id, step: step as ProvisioningStepType } },
+  }).catch(() => null);
+  if (!bindingStep) throw notFound();
 
   if (action === "retry") {
     await retryStep(id, step as ProvisioningStepType, user.id);
@@ -23,7 +24,7 @@ export const POST = api<Ctx>(async (_req, ctx) => {
   }
   const steps = await prisma.provisioningStep.findMany({
     where: { bindingId: id },
-    orderBy: { createdAt: "asc" },
+    orderBy: [{ position: "asc" }, { createdAt: "asc" }],
     select: { step: true, status: true, errorMessage: true },
   });
   return json({ ok: true, steps });

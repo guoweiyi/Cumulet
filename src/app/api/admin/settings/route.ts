@@ -3,16 +3,23 @@ import { z } from "zod";
 import { api, badRequest, json } from "@/lib/api";
 import { requireSuperAdmin } from "@/lib/guards";
 import { audit } from "@/lib/audit";
-import { getSetting, setSetting, toClientSafe, getDefaultQuota } from "@/lib/settings";
+import {
+  getSetting,
+  setSetting,
+  toClientSafe,
+  getDefaultQuota,
+  getEffectiveOidcSettings,
+} from "@/lib/settings";
 
 /** All settings, secrets stripped (write-only in the UI). SUPER_ADMIN only. */
 export const GET = api(async () => {
   await requireSuperAdmin();
-  const [smtp, jumpserver, provisioning, ai, defaultQuota] = await Promise.all([
+  const [smtp, jumpserver, provisioning, ai, oidc, defaultQuota] = await Promise.all([
     getSetting("smtp"),
     getSetting("jumpserver"),
     getSetting("provisioning"),
     getSetting("ai"),
+    getEffectiveOidcSettings(),
     getDefaultQuota(),
   ]);
   return json({
@@ -20,6 +27,7 @@ export const GET = api(async () => {
     jumpserver: toClientSafe("jumpserver", jumpserver),
     provisioning,
     ai: toClientSafe("ai", ai),
+    oidc: toClientSafe("oidc", oidc),
     defaultQuota,
   });
 });
@@ -40,7 +48,6 @@ const jsSchema = z.object({
   privateToken: z.string().max(512),
   accessKeyId: z.string().max(128),
   accessKeySecret: z.string().max(512),
-  assetNodeId: z.string().max(64),
   defaultAccountUsername: z.string().max(64),
   autoCreateUsers: z.boolean(),
 });
@@ -48,7 +55,6 @@ const jsSchema = z.object({
 const provisioningSchema = z.object({
   defaultSecurityGroup: z.string().max(64),
   jumpServerInternalIp: z.string().max(45),
-  portalUrl: z.string().max(255),
 });
 
 const quotaSchema = z.object({
@@ -83,8 +89,33 @@ const aiSchema = z.object({
   batchSize: z.number().int().min(1).max(100),
 });
 
+function safeOidcIssuer(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    if (url.username || url.password || url.search || url.hash) return false;
+    if (["169.254.169.254", "metadata.google.internal"].includes(hostname)) return false;
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(hostname);
+  } catch {
+    return false;
+  }
+}
+
+const oidcSchema = z.object({
+  enabled: z.boolean(),
+  providerName: z.string().trim().min(1).max(64),
+  issuer: z.string().trim().max(512).refine((value) => value === "" || safeOidcIssuer(value)),
+  clientId: z.string().trim().max(255),
+  clientSecret: z.string().max(1024),
+}).superRefine((value, ctx) => {
+  if (!value.enabled) return;
+  if (!value.issuer) ctx.addIssue({ code: "custom", path: ["issuer"], message: "required" });
+  if (!value.clientId) ctx.addIssue({ code: "custom", path: ["clientId"], message: "required" });
+});
+
 const bodySchema = z.object({
-  section: z.enum(["smtp", "jumpserver", "provisioning", "defaultQuota", "ai"]),
+  section: z.enum(["smtp", "jumpserver", "provisioning", "defaultQuota", "ai", "oidc"]),
   value: z.unknown(),
 });
 
@@ -123,6 +154,18 @@ export const PUT = api(async (req: NextRequest) => {
       const v = aiSchema.safeParse(value);
       if (!v.success) throw badRequest("invalid_ai");
       await setSetting("ai", v.data, user.id);
+      break;
+    }
+    case "oidc": {
+      const v = oidcSchema.safeParse(value);
+      if (!v.success) throw badRequest("invalid_oidc");
+      const existing = await getEffectiveOidcSettings();
+      const next = {
+        ...v.data,
+        clientSecret: v.data.clientSecret || existing?.clientSecret || "",
+      };
+      if (next.enabled && !next.clientSecret) throw badRequest("oidc_secret_required");
+      await setSetting("oidc", next, user.id);
       break;
     }
   }

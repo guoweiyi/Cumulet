@@ -24,7 +24,6 @@ export type JumpServerSettings = {
   privateToken: string; // encrypted at rest
   accessKeyId: string;
   accessKeySecret: string; // encrypted at rest
-  assetNodeId: string; // tree placement for created assets
   defaultAccountUsername: string; // login account configured on assets
   autoCreateUsers: boolean;
 };
@@ -39,7 +38,6 @@ export type DefaultQuotaSettings = {
 export type ProvisioningSettings = {
   defaultSecurityGroup: string; // PVE security group name
   jumpServerInternalIp: string; // source for the baseline SSH allow rule
-  portalUrl: string; // JumpServer portal URL surfaced to end users
 };
 
 export type AiSettings = {
@@ -54,12 +52,21 @@ export type AiSettings = {
   batchSize: number;
 };
 
+export type OidcSettings = {
+  enabled: boolean;
+  providerName: string;
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+};
+
 type SettingsMap = {
   smtp: SmtpSettings;
   jumpserver: JumpServerSettings;
   defaultQuota: DefaultQuotaSettings;
   provisioning: ProvisioningSettings;
   ai: AiSettings;
+  oidc: OidcSettings;
 };
 
 const SECRET_FIELDS: Record<keyof SettingsMap, string[]> = {
@@ -68,6 +75,7 @@ const SECRET_FIELDS: Record<keyof SettingsMap, string[]> = {
   defaultQuota: [],
   provisioning: [],
   ai: ["apiKey"],
+  oidc: ["clientSecret"],
 };
 
 export const DEFAULTS: { defaultQuota: DefaultQuotaSettings } = {
@@ -141,4 +149,15 @@ export async function getDefaultQuota(): Promise<DefaultQuotaSettings> {
     maxDiskGB: legacy.maxDiskGB ?? legacy.maxDiskGb ?? 100,
     maxFirewallRules: legacy.maxFirewallRules,
   };
+}
+
+/** DB configuration wins; environment values are a migration fallback only. */
+export async function getEffectiveOidcSettings(): Promise<OidcSettings | null> {
+  const stored = await getSetting("oidc");
+  if (stored) return stored;
+  const issuer = process.env.OIDC_ISSUER?.trim() ?? "";
+  const clientId = process.env.OIDC_CLIENT_ID?.trim() ?? "";
+  const clientSecret = process.env.OIDC_CLIENT_SECRET ?? "";
+  if (!issuer || !clientId || !clientSecret) return null;
+  return { enabled: true, providerName: "SSO", issuer, clientId, clientSecret };
 }

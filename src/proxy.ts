@@ -60,7 +60,7 @@ export default async function proxy(req: NextRequest) {
     return NextResponse.redirect(new URL("/", req.url));
   }
 
-  // One-time real-name onboarding gate for the client portal.
+  // One-time identity onboarding gate for the client portal.
   if (!isApi && !isAdminArea) {
     if (token.needsOnboarding && pathname !== "/onboarding") {
       return NextResponse.redirect(new URL("/onboarding", req.url));

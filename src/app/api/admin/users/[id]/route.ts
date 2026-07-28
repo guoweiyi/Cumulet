@@ -20,6 +20,7 @@ export const GET = api<Ctx>(async (_req, ctx) => {
       email: true,
       nickname: true,
       realName: true,
+      studentId: true,
       role: true,
       preferredLocale: true,
       createdAt: true,
@@ -36,6 +37,7 @@ const patchSchema = z.object({
   nickname: z.string().max(64).nullish(),
   email: z.string().email().max(255).optional(),
   realName: z.string().min(2).max(64).nullish(),
+  studentId: z.string().regex(/^\d{1,32}$/).nullish(),
   preferredLocale: z.enum(["zh", "en"]).optional(),
   role: z.enum(["USER", "AUDITOR", "ADMIN", "SUPER_ADMIN"]).optional(),
   quota: z
@@ -56,7 +58,7 @@ export const PATCH = api<Ctx>(async (req: NextRequest, ctx) => {
 
   const parsed = patchSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) throw badRequest();
-  const { nickname, email, realName, preferredLocale, role, quota, password } = parsed.data;
+  const { nickname, email, realName, studentId, preferredLocale, role, quota, password } = parsed.data;
 
   if (!canGrantRoles(actor.role) && (role !== undefined || password !== undefined)) throw forbidden();
 
@@ -97,6 +99,15 @@ export const PATCH = api<Ctx>(async (req: NextRequest, ctx) => {
           userData.realNameSetAt = new Date();
         }
       }
+      if (studentId !== undefined && studentId !== null) {
+        if (target.studentId !== null && target.studentId !== studentId) {
+          throw new ApiError(403, "student_id_immutable");
+        }
+        if (target.studentId === null) {
+          userData.studentId = studentId;
+          userData.studentIdSetAt = new Date();
+        }
+      }
 
       // Serializable isolation makes the last-SUPER_ADMIN guard race-safe.
       if (role && target.role === "SUPER_ADMIN" && role !== "SUPER_ADMIN") {
@@ -126,14 +137,19 @@ export const PATCH = api<Ctx>(async (req: NextRequest, ctx) => {
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      throw badRequest("email_taken");
+      const target = String(error.meta?.target ?? "");
+      throw badRequest(target.includes("studentId") ? "student_id_in_use" : "email_taken");
     }
-    if (error instanceof ApiError && error.code === "realname_immutable") {
+    if (
+      error instanceof ApiError &&
+      ["realname_immutable", "student_id_immutable"].includes(error.code)
+    ) {
       await audit({
         actorId: actor.id,
-        action: "user.realname.change_rejected",
+        action: "user.identity.change_rejected",
         targetType: "User",
         targetId: id,
+        metadata: { field: error.code === "realname_immutable" ? "realName" : "studentId" },
       });
     }
     throw error;

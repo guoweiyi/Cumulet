@@ -2,16 +2,29 @@ import { NextRequest } from "next/server";
 import { api, json } from "@/lib/api";
 import { prisma } from "@/lib/prisma";
 import { requireAdminWrite } from "@/lib/guards";
-import { getSetting } from "@/lib/settings";
+import { parseWorkflowDefinition } from "@/lib/workflow-definition";
 
 /** Data for the Approve & Provision dialog. */
 export const GET = api(async (req: NextRequest) => {
   await requireAdminWrite();
   const ticketId = req.nextUrl.searchParams.get("ticketId");
   const ticket = ticketId
-    ? await prisma.ticket.findUnique({ where: { id: ticketId }, select: { userId: true } })
+    ? await prisma.ticket.findUnique({
+        where: { id: ticketId },
+        select: {
+          values: true,
+          user: { select: { tenantMemberships: { select: { tenantId: true } } } },
+        },
+      })
     : null;
-  const [nodes, securityGroups, subnets, gateways, dnsZones, provisioning] = await Promise.all([
+  const tenantIds = ticket?.user.tenantMemberships.map((membership) => membership.tenantId) ?? [];
+  const values = ticket?.values && typeof ticket.values === "object" && !Array.isArray(ticket.values)
+    ? ticket.values as Record<string, unknown>
+    : {};
+  const resourceType = typeof values.resource_type === "string" && values.resource_type.trim()
+    ? values.resource_type.trim().toLowerCase()
+    : "vm";
+  const [nodes, securityGroups, gateways, dnsZones, workflowAssignment] = await Promise.all([
     prisma.pveNode.findMany({
       select: { id: true, name: true, nodeName: true, verified: true },
       orderBy: { name: "asc" },
@@ -20,42 +33,39 @@ export const GET = api(async (req: NextRequest) => {
       select: { id: true, name: true, description: true, isProvisioningDefault: true },
       orderBy: { name: "asc" },
     }),
-    prisma.subnet.findMany({
-      where: {
-        status: "ACTIVE",
-        network: {
-          status: "ACTIVE",
-          ...(ticket ? { tenant: { memberships: { some: { userId: ticket.userId } } } } : {}),
-        },
-      },
-      select: {
-        id: true,
-        name: true,
-        cidr: true,
-        network: {
-          select: { name: true, tenantId: true, tenant: { select: { name: true } } },
-        },
-      },
-      orderBy: [{ network: { name: "asc" } }, { name: "asc" }],
-    }),
     prisma.reverseProxyGateway.findMany({
-      where: { enabled: true },
+      where: {
+        enabled: true,
+        ...(ticket ? { OR: [{ tenantId: null }, { tenantId: { in: tenantIds } }] } : {}),
+      },
       select: { id: true, name: true, tenantId: true, publicHost: true, mode: true },
       orderBy: { name: "asc" },
     }),
     prisma.dnsZone.findMany({
+      where: ticket ? { tenantId: { in: tenantIds } } : undefined,
       select: { id: true, domain: true, tenantId: true, mode: true },
       orderBy: { domain: "asc" },
     }),
-    getSetting("provisioning"),
+    prisma.resourceWorkflowBinding.findUnique({
+      where: { resourceType },
+      include: { workflowSchema: true },
+    }),
   ]);
-  void provisioning;
+  const workflow = workflowAssignment
+    ? parseWorkflowDefinition(workflowAssignment.workflowSchema.definition)
+    : null;
   return json({
     nodes,
     securityGroups,
-    subnets,
     gateways,
     dnsZones,
+    workflow: workflow ? {
+      id: workflowAssignment!.workflowSchemaId,
+      version: workflowAssignment!.workflowSchema.version,
+      name: workflow.meta.name,
+      resourceType: workflow.meta.resourceType,
+      steps: workflow.steps,
+    } : null,
     defaultCiUser: "ubuntu",
     defaultLeaseDurationDays: 30,
   });

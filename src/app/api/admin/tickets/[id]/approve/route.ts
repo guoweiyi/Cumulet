@@ -7,13 +7,16 @@ import { requireAdminWrite } from "@/lib/guards";
 import { audit } from "@/lib/audit";
 import { addSystemMessage, assertTransition } from "@/lib/tickets";
 import { emailTicketStatus } from "@/lib/emails";
-import { runPipeline, STEP_ORDER } from "@/lib/pipeline";
+import { runPipeline } from "@/lib/pipeline";
 import { assertQuotaAvailable, requestedCapacity } from "@/lib/quota";
 import { getDefaultQuota } from "@/lib/settings";
 import { getHypervisorProvider, ProviderError } from "@/lib/providers";
 import { emitTicketStatusChanged } from "@/lib/webhooks";
 import { addressInCidr, ticketRequestsExternalAccess } from "@/lib/networking";
 import { buildResourceName } from "@/lib/resource-naming";
+import { encryptSecret } from "@/lib/crypto";
+import { assignedWorkflow } from "@/lib/workflow-service";
+import { parseWorkflowDefinition } from "@/lib/workflow-definition";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -39,14 +42,13 @@ const approveSchema = z.object({
   vmid: z.number().int().min(100).max(999_999_999),
   internalIp: z.string().min(3).max(45),
   ciUser: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/),
+  initialPassword: z.string().min(8).max(200),
   sshKeys: z.string().max(4000).optional().default(""),
   nameserver: z.string().max(64).optional().default(""),
   ipconfig: z.string().max(128).optional().default(""),
   configureSecurityGroup: z.boolean().default(true),
   securityGroup: z.string().min(1).max(64).optional(),
-  configureJumpServer: z.boolean().default(true),
   leaseDurationDays: z.number().int().min(1).max(3650).optional().default(30),
-  subnetId: z.string().min(1).optional(),
   externalAccess: externalAccessSchema.optional(),
 });
 
@@ -71,33 +73,28 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   if (!parsed.success) throw badRequest("invalid_approve");
   const data = parsed.data;
   if (data.configureSecurityGroup && !data.securityGroup) throw badRequest("security_group_required");
-  if (ticketRequestsExternalAccess(ticket.values) && !data.externalAccess) {
-    throw badRequest("external_access_config_required");
-  }
-  if (data.externalAccess && !data.subnetId) throw badRequest("external_access_requires_subnet");
-
   const node = await prisma.pveNode.findUnique({ where: { id: data.pveNodeId } });
   if (!node) throw badRequest("node_not_found");
   if (!node.verified) throw new ApiError(409, "node_not_verified");
   if (!node.providerInstanceId) throw new ApiError(409, "provider_not_configured");
 
-  const subnet = data.subnetId
-    ? await prisma.subnet.findUnique({
-        where: { id: data.subnetId },
-        include: { network: true },
-      })
-    : null;
-  if (data.subnetId) {
-    if (!subnet || subnet.status !== "ACTIVE" || subnet.network.status !== "ACTIVE") {
-      throw badRequest("subnet_not_available");
-    }
-    if (!addressInCidr(data.internalIp, subnet.cidr)) throw badRequest("address_outside_subnet");
-    const membership = await prisma.tenantMembership.findUnique({
-      where: { tenantId_userId: { tenantId: subnet.network.tenantId, userId: ticket.userId } },
-      select: { id: true },
-    });
-    if (!membership) throw badRequest("resource_owner_not_in_tenant");
-  }
+  // Network placement is derived from the approved IP. The administrator no
+  // longer chooses a user VPC manually; overlapping ranges prefer the most
+  // specific prefix.
+  const candidateSubnets = await prisma.subnet.findMany({
+    where: {
+      status: "ACTIVE",
+      network: {
+        status: "ACTIVE",
+        tenant: { memberships: { some: { userId: ticket.userId } } },
+      },
+    },
+    include: { network: true },
+  });
+  const subnet = candidateSubnets
+    .filter((candidate) => addressInCidr(data.internalIp, candidate.cidr))
+    .sort((left, right) => Number(right.cidr.split("/")[1] ?? 0) - Number(left.cidr.split("/")[1] ?? 0))[0] ?? null;
+  if (data.externalAccess && !subnet) throw badRequest("external_access_requires_subnet");
   if (data.externalAccess && subnet) {
     const [gateway, zone] = await Promise.all([
       prisma.reverseProxyGateway.findUnique({ where: { id: data.externalAccess.gatewayId } }),
@@ -149,6 +146,21 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   const values = ticket.values && typeof ticket.values === "object" && !Array.isArray(ticket.values)
     ? (ticket.values as Record<string, unknown>)
     : {};
+  const resourceType = typeof values.resource_type === "string" && values.resource_type.trim()
+    ? values.resource_type.trim().toLowerCase()
+    : "vm";
+  const assignment = await assignedWorkflow(resourceType);
+  const workflowDefinition = assignment
+    ? parseWorkflowDefinition(assignment.workflowSchema.definition)
+    : null;
+  if (!assignment || !workflowDefinition) throw badRequest("workflow_not_assigned");
+  if (
+    workflowDefinition.steps.includes("EXTERNAL_ACCESS") &&
+    ticketRequestsExternalAccess(ticket.values) &&
+    !data.externalAccess
+  ) {
+    throw badRequest("external_access_config_required");
+  }
   const requestedName = typeof values.resource_name === "string" ? values.resource_name : `vm-${data.vmid}`;
   const displayName = buildResourceName(ticket.user, requestedName, data.vmid);
 
@@ -183,14 +195,15 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
         internalIp: data.internalIp,
         boundById: user.id,
         cloudInitUser: data.ciUser,
+        initialPasswordEnc: encryptSecret(data.initialPassword),
         pveSecurityGroup: data.configureSecurityGroup ? data.securityGroup : null,
         resourceId: resource.id,
+        workflowSchemaId: assignment.workflowSchemaId,
         provisionMeta: {
           ipconfig: data.ipconfig,
           nameserver: data.nameserver,
           sshKeys: data.sshKeys,
           configureSecurityGroup: data.configureSecurityGroup,
-          configureJumpServer: data.configureJumpServer,
           ...(data.externalAccess ? { externalAccess: data.externalAccess } : {}),
         } as Prisma.InputJsonValue,
       },
@@ -206,7 +219,7 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
       });
     }
     await tx.provisioningStep.createMany({
-      data: STEP_ORDER.map((step) => ({ bindingId: b.id, step })),
+      data: workflowDefinition.steps.map((step, position) => ({ bindingId: b.id, step, position })),
     });
     return b;
   });

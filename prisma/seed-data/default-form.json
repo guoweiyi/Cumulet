@@ -10,12 +10,6 @@
   },
   "fields": [
     {
-      "id": "student_id",
-      "type": "text",
-      "label": { "zh": "学号", "en": "Student ID" },
-      "required": true
-    },
-    {
       "id": "resource_name",
       "type": "text",
       "label": { "zh": "资源名称/用途", "en": "Resource Name / Purpose" },

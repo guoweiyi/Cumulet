@@ -1,10 +1,11 @@
-import NextAuth from "next-auth";
+import NextAuth, { type NextAuthConfig } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 import { verifyPayload } from "@/lib/crypto";
 import { audit } from "@/lib/audit";
 import { trustedOidcEmail } from "@/lib/auth-policy";
+import { getEffectiveOidcSettings } from "@/lib/settings";
 import type { Role } from "@prisma/client";
 
 export const ADMIN_ROLES: Role[] = ["AUDITOR", "ADMIN", "SUPER_ADMIN"];
@@ -22,28 +23,37 @@ function jtiSeen(jti: string): boolean {
 async function refreshClaims(uid: string) {
   const u = await prisma.user.findUnique({
     where: { id: uid },
-    select: { id: true, role: true, realName: true, email: true },
+    select: { id: true, role: true, realName: true, studentId: true, email: true },
   });
   if (!u) return null;
-  return { role: u.role, needsOnboarding: u.realName === null, email: u.email };
+  return {
+    role: u.role,
+    needsOnboarding: u.realName === null || u.studentId === null,
+    email: u.email,
+  };
 }
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+export const { handlers, auth, signIn, signOut } = NextAuth(async (): Promise<NextAuthConfig> => {
+  const oidc = await getEffectiveOidcSettings();
+  const oidcEnabled = Boolean(
+    oidc?.enabled && oidc.issuer && oidc.clientId && oidc.clientSecret,
+  );
+  return {
   secret: process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET,
   trustHost: true,
   session: { strategy: "jwt", maxAge: 12 * 60 * 60 },
   pages: { signIn: "/login", error: "/login" },
   providers: [
     // Client portal SSO (e.g. Casdoor). User is upserted on first login.
-    {
+    ...(oidcEnabled ? [{
       id: "oidc",
-      name: "SSO",
-      type: "oidc",
-      issuer: process.env.OIDC_ISSUER,
-      clientId: process.env.OIDC_CLIENT_ID,
-      clientSecret: process.env.OIDC_CLIENT_SECRET,
-      checks: ["pkce", "state", "nonce"],
-      profile(profile) {
+      name: oidc!.providerName,
+      type: "oidc" as const,
+      issuer: oidc!.issuer,
+      clientId: oidc!.clientId,
+      clientSecret: oidc!.clientSecret,
+      checks: ["pkce", "state", "nonce"] as ("pkce" | "state" | "nonce")[],
+      profile(profile: Record<string, unknown>) {
         return {
           id: String(profile.sub),
           email: profile.email as string | undefined,
@@ -53,7 +63,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             (profile.nickname as string | undefined),
         };
       },
-    },
+    }] : []),
     // Admin portal: email + password (argon2/bcrypt hash, lockout on failures).
     Credentials({
       id: "admin-password",
@@ -184,4 +194,5 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return session;
     },
   },
+  };
 });

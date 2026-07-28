@@ -17,6 +17,7 @@ import {
   SlidersHorizontal,
   Shield,
   Blocks,
+  Workflow,
   Ticket,
   Users,
 } from "lucide-react";
@@ -29,6 +30,7 @@ const NAV = [
   { href: "/admin", key: "overview", icon: Gauge, exact: true },
   { href: "/admin/tickets", key: "tickets", icon: Ticket },
   { href: "/admin/forms", key: "forms", icon: FileEdit, writeOnly: false },
+  { href: "/admin/workflows", key: "workflows", icon: Workflow },
   { href: "/admin/resources", key: "resources", icon: Server },
   { href: "/admin/resize-requests", key: "resizeRequests", icon: SlidersHorizontal },
   { href: "/admin/ai-inspections", key: "aiInspections", icon: BrainCircuit },

@@ -189,6 +189,8 @@ model User {
   nickname        String?   @db.VarChar(64)
   realName        String?   @db.VarChar(64) // null until onboarding, then immutable (enforced at API layer)
   realNameSetAt   DateTime?
+  studentId       String?   @unique @db.VarChar(32)
+  studentIdSetAt  DateTime?
   role            Role      @default(USER)
   preferredLocale String    @default("zh") @db.VarChar(8)
   createdAt       DateTime  @default(now())
@@ -196,23 +198,25 @@ model User {
 
   adminCredential          AdminCredential?
   quota                    UserQuota?
-  tickets                  Ticket[]                @relation("TicketRequester")
-  decidedTickets           Ticket[]                @relation("TicketDecider")
+  tickets                  Ticket[]                  @relation("TicketRequester")
+  decidedTickets           Ticket[]                  @relation("TicketDecider")
   ticketMessages           TicketMessage[]
-  boundBindings            ResourceBinding[]       @relation("BindingOperator")
+  boundBindings            ResourceBinding[]         @relation("BindingOperator")
   createdFormSchemas       FormSchema[]
+  createdWorkflowSchemas   WorkflowSchema[]
+  updatedWorkflowBindings  ResourceWorkflowBinding[]
   createdSecurityGroups    SecurityGroup[]
   updatedBaselines         VmFirewallBaseline[]
   updatedSettings          SystemSetting[]
   auditLogs                AuditLog[]
   requestedInspections     AiInspectionLog[]
   tenantMemberships        TenantMembership[]
-  ownedResources           ProvisionedResource[]   @relation("ResourceOwner")
-  createdTenants           Tenant[]                @relation("TenantCreator")
-  createdNetworks          Network[]               @relation("NetworkCreator")
-  createdWebhooks          WebhookEndpoint[]       @relation("WebhookCreator")
-  requestedResourceChanges ResourceResizeRequest[] @relation("ResizeRequester")
-  decidedResourceChanges   ResourceResizeRequest[] @relation("ResizeDecider")
+  ownedResources           ProvisionedResource[]     @relation("ResourceOwner")
+  createdTenants           Tenant[]                  @relation("TenantCreator")
+  createdNetworks          Network[]                 @relation("NetworkCreator")
+  createdWebhooks          WebhookEndpoint[]         @relation("WebhookCreator")
+  requestedResourceChanges ResourceResizeRequest[]   @relation("ResizeRequester")
+  decidedResourceChanges   ResourceResizeRequest[]   @relation("ResizeDecider")
 }
 
 // 1:1 with admin-capable users; passkeys hang off it 1:N (an admin can
@@ -271,6 +275,35 @@ model FormSchema {
 
   @@unique([familyKey, version])
   @@index([status])
+}
+
+model WorkflowSchema {
+  id          String           @id @default(cuid())
+  familyKey   String           @db.VarChar(64)
+  version     Int
+  status      FormSchemaStatus @default(DRAFT)
+  definition  Json
+  createdById String?
+  createdBy   User?            @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  publishedAt DateTime?
+
+  resourceBindings ResourceWorkflowBinding[]
+  bindings         ResourceBinding[]
+
+  @@unique([familyKey, version])
+  @@index([status])
+}
+
+model ResourceWorkflowBinding {
+  id               String         @id @default(cuid())
+  resourceType     String         @unique @db.VarChar(64)
+  workflowSchemaId String
+  workflowSchema   WorkflowSchema @relation(fields: [workflowSchemaId], references: [id], onDelete: Restrict)
+  updatedById      String?
+  updatedBy        User?          @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedAt        DateTime       @updatedAt
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +382,7 @@ model ResourceBinding {
   boundBy                    User                @relation("BindingOperator", fields: [boundById], references: [id])
   boundAt                    DateTime            @default(now())
   cloudInitUser              String              @db.VarChar(32)
+  initialPasswordEnc         String?             @db.Text
   initialPasswordDeliveredAt DateTime?
   provisionMeta              Json? // admin-supplied ipconfig0/nameserver/sshKeys captured at approve
   pveSecurityGroup           String?             @db.VarChar(64) // group applied at provisioning
@@ -356,6 +390,8 @@ model ResourceBinding {
   jsPermissionId             String?             @db.VarChar(64) // JumpServer asset-permission UUID
   resourceId                 String              @unique
   resource                   ProvisionedResource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  workflowSchemaId           String?
+  workflowSchema             WorkflowSchema?     @relation(fields: [workflowSchemaId], references: [id], onDelete: Restrict)
 
   steps              ProvisioningStep[]
   firewallBaseline   VmFirewallBaseline?
@@ -371,6 +407,7 @@ model ProvisioningStep {
   binding      ResourceBinding        @relation(fields: [bindingId], references: [id], onDelete: Cascade)
   step         ProvisioningStepType
   status       ProvisioningStepStatus @default(PENDING)
+  position     Int                    @default(0)
   errorMessage String?                @db.Text
   attempts     Int                    @default(0)
   startedAt    DateTime?

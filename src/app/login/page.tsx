@@ -8,12 +8,14 @@ import { Cloud, LogIn } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { LanguageSwitcher } from "@/components/language-switcher";
+import { useOidcStatus } from "@/hooks/use-oidc-status";
 
 function LoginInner() {
   const t = useTranslations("auth");
   const tc = useTranslations("common");
   const params = useSearchParams();
   const [busy, setBusy] = useState(false);
+  const oidc = useOidcStatus();
   const callbackUrl = params.get("callbackUrl") ?? "/";
 
   return (
@@ -36,7 +38,7 @@ function LoginInner() {
           <Button
             className="w-full"
             size="lg"
-            disabled={busy}
+            disabled={busy || !oidc?.enabled}
             onClick={() => {
               setBusy(true);
               // callbackUrl is restricted to same-origin paths by Auth.js
@@ -44,7 +46,7 @@ function LoginInner() {
             }}
           >
             <LogIn className="size-4" />
-            {busy ? t("signingIn") : t("loginWithSso")}
+            {busy ? t("signingIn") : oidc?.enabled ? oidc.providerName : t("ssoUnavailable")}
           </Button>
         </CardContent>
       </Card>

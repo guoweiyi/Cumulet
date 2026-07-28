@@ -19,6 +19,7 @@ export const GET = api(async () => {
         email: true,
         nickname: true,
         realName: true,
+        studentId: true,
         role: true,
         preferredLocale: true,
         createdAt: true,
@@ -35,6 +36,7 @@ export const GET = api(async () => {
       email: u.email,
       nickname: u.nickname,
       realName: u.realName,
+      studentId: u.studentId,
       role: u.role,
       preferredLocale: u.preferredLocale,
       createdAt: u.createdAt.toISOString(),
@@ -58,6 +60,7 @@ const createSchema = z.object({
   email: z.string().email().max(255),
   nickname: z.string().max(64).optional(),
   realName: z.string().min(2).max(64).optional(),
+  studentId: z.string().regex(/^\d{1,32}$/).optional(),
   role: z.enum(["USER", "AUDITOR", "ADMIN", "SUPER_ADMIN"]).default("USER"),
   preferredLocale: z.enum(["zh", "en"]).default("zh"),
   password: z.string().min(10).max(200).optional(),
@@ -90,6 +93,8 @@ export const POST = api(async (req: NextRequest) => {
         nickname: data.nickname ?? email.split("@")[0],
         realName: data.realName ?? null,
         realNameSetAt: data.realName ? new Date() : null,
+        studentId: data.studentId ?? null,
+        studentIdSetAt: data.studentId ? new Date() : null,
         role: data.role,
         preferredLocale: data.preferredLocale,
         ...(adminCapable && data.password
@@ -103,7 +108,8 @@ export const POST = api(async (req: NextRequest) => {
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      throw badRequest("email_taken");
+      const target = String(error.meta?.target ?? "");
+      throw badRequest(target.includes("studentId") ? "student_id_in_use" : "email_taken");
     }
     throw error;
   }

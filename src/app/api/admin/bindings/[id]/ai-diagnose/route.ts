@@ -28,7 +28,7 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
     error: step.errorMessage,
     providerType: binding.resource.provider.type,
     resource: { cpuCores: binding.resource.cpuCores, ramGB: binding.resource.ramGB, diskGB: binding.resource.diskGB },
-    integrations: { securityGroup: !!binding.pveSecurityGroup, jumpServer: meta.configureJumpServer !== false, externalAccess: !!meta.externalAccess },
+    integrations: { securityGroup: !!binding.pveSecurityGroup, jumpServer: true, externalAccess: !!meta.externalAccess },
     locale: parsed.data.locale,
   });
   await audit({ actorId: actor.id, action: "ai.provisioning_diagnosis", targetType: "ResourceBinding", targetId: id, metadata: { step: step.step, confidence: diagnosis.confidence } });

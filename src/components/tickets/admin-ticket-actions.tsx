@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { CheckCircle2, Loader2, ShieldAlert, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, Eye, EyeOff, Loader2, RefreshCw, ShieldAlert, Trash2, XCircle } from "lucide-react";
 import { localized, type I18nText } from "@/i18n/config";
 import type { TicketDetailData } from "@/lib/ticket-data";
 import { Button } from "@/components/ui/button";
@@ -30,12 +30,6 @@ import { Switch } from "@/components/ui/switch";
 type ProvisionOptions = {
   nodes: { id: string; name: string; nodeName: string; verified: boolean }[];
   securityGroups: { id: string; name: string; description: I18nText | null; isProvisioningDefault: boolean }[];
-  subnets: {
-    id: string;
-    name: string;
-    cidr: string;
-    network: { name: string; tenantId: string; tenant: { name: string } };
-  }[];
   gateways: {
     id: string;
     name: string;
@@ -51,7 +45,21 @@ type ProvisionOptions = {
   }[];
   defaultCiUser: string;
   defaultLeaseDurationDays: number;
+  workflow: {
+    id: string;
+    version: number;
+    name: I18nText;
+    resourceType: string;
+    steps: string[];
+  } | null;
 };
+
+function generateInitialPassword(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+  const bytes = new Uint32Array(18);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (value) => alphabet[value % alphabet.length]).join("");
+}
 
 /** Approve & Provision / Reject / Close / Deprovision buttons + dialogs. */
 export function AdminTicketActions({
@@ -74,19 +82,19 @@ export function AdminTicketActions({
   const [busy, setBusy] = useState(false);
 
   const [options, setOptions] = useState<ProvisionOptions | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
   const [form, setForm] = useState({
     pveNodeId: "",
     vmid: "",
     internalIp: "",
     ciUser: "ubuntu",
+    initialPassword: "",
     sshKeys: "",
     nameserver: "",
     ipconfig: "",
     configureSecurityGroup: true,
     securityGroup: "",
-    configureJumpServer: true,
     leaseDurationDays: "30",
-    subnetId: "",
     externalEnabled: externalRequested,
     gatewayId: "",
     protocol: "HTTPS" as "TCP" | "HTTP" | "HTTPS",
@@ -105,23 +113,18 @@ export function AdminTicketActions({
       .then((data: ProvisionOptions | null) => {
         if (!data) return;
         setOptions(data);
-        const subnet = data.subnets[0];
-        const gateway = data.gateways.find(
-          (item) => item.tenantId === null || item.tenantId === subnet?.network.tenantId,
-        );
-        const zone = data.dnsZones.find(
-          (item) => item.tenantId === subnet?.network.tenantId,
-        );
+        const gateway = data.gateways[0];
+        const zone = data.dnsZones[0];
         setForm((f) => ({
           ...f,
           pveNodeId: data.nodes.find((node) => node.verified)?.id ?? "",
           ciUser: data.defaultCiUser || "ubuntu",
+          initialPassword: f.initialPassword || generateInitialPassword(),
           securityGroup:
             data.securityGroups.find((g) => g.isProvisioningDefault)?.name ??
             data.securityGroups[0]?.name ??
             "",
           leaseDurationDays: String(data.defaultLeaseDurationDays || 30),
-          subnetId: subnet?.id ?? "",
           gatewayId: gateway?.id ?? "",
           dnsZoneId: zone?.id ?? "",
         }));
@@ -168,14 +171,9 @@ export function AdminTicketActions({
   }
 
   const status = ticket.status;
-  const selectedSubnet = options?.subnets.find((subnet) => subnet.id === form.subnetId);
-  const availableGateways = options?.gateways.filter(
-    (gateway) =>
-      gateway.tenantId === null || gateway.tenantId === selectedSubnet?.network.tenantId,
-  ) ?? [];
-  const availableDnsZones = options?.dnsZones.filter(
-    (zone) => zone.tenantId === selectedSubnet?.network.tenantId,
-  ) ?? [];
+  const availableGateways = options?.gateways ?? [];
+  const availableDnsZones = options?.dnsZones ?? [];
+  const externalAccessSupported = options?.workflow?.steps.includes("EXTERNAL_ACCESS") ?? false;
 
   if (ticket.isSystemAlert) {
     return status === "CLOSED" ? null : (
@@ -237,6 +235,16 @@ export function AdminTicketActions({
             </div>
           ) : (
             <div className="grid max-h-[60vh] grid-cols-2 gap-3 overflow-y-auto px-1 py-1">
+              <div className="col-span-2 rounded-md border bg-neutral-50 px-3 py-2 text-sm">
+                <span className="text-neutral-500">{t("workflow")}: </span>
+                {options.workflow ? (
+                  <span className="font-medium">
+                    {localized(options.workflow.name, locale)} · v{options.workflow.version} · {options.workflow.resourceType}
+                  </span>
+                ) : (
+                  <span className="font-medium text-red-600">{t("workflowMissing")}</span>
+                )}
+              </div>
               <Field label={t("azNode")}>
                 <Select
                   value={form.pveNodeId}
@@ -276,6 +284,22 @@ export function AdminTicketActions({
               <Field label={t("ciUser")}>
                 <Input value={form.ciUser} onChange={(e) => setForm({ ...form, ciUser: e.target.value })} />
               </Field>
+              <Field label={t("initialPassword")} hint={t("initialPasswordHint")}>
+                <div className="flex gap-1.5">
+                  <Input
+                    type={showPassword ? "text" : "password"}
+                    value={form.initialPassword}
+                    autoComplete="new-password"
+                    onChange={(e) => setForm({ ...form, initialPassword: e.target.value })}
+                  />
+                  <Button type="button" size="icon" variant="outline" onClick={() => setShowPassword((value) => !value)} title={showPassword ? t("hidePassword") : t("showPassword")}>
+                    {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </Button>
+                  <Button type="button" size="icon" variant="outline" onClick={() => setForm({ ...form, initialPassword: generateInitialPassword() })} title={t("generatePassword")}>
+                    <RefreshCw className="size-4" />
+                  </Button>
+                </div>
+              </Field>
               <div className="col-span-2">
                 <Field label={t("ipconfig")} hint={t("ipconfigHint")}>
                   <Input
@@ -313,13 +337,6 @@ export function AdminTicketActions({
                   </Select>
                 </Field>
               )}
-              <div className="col-span-2 flex items-center justify-between gap-4 border-t border-neutral-200 pt-3">
-                <div>
-                  <Label>{t("configureJumpServer")}</Label>
-                  <p className="mt-0.5 text-xs text-neutral-500">{t("configureJumpServerHint")}</p>
-                </div>
-                <Switch checked={form.configureJumpServer} onCheckedChange={(checked) => setForm({ ...form, configureJumpServer: checked })} />
-              </div>
               <Field label={t("leaseDurationDays")}>
                 <Input
                   value={form.leaseDurationDays}
@@ -329,35 +346,6 @@ export function AdminTicketActions({
                     leaseDurationDays: e.target.value.replace(/\D/g, ""),
                   })}
                 />
-              </Field>
-              <Field label={t("subnet")} hint={t("subnetHint")}>
-                <Select
-                  value={form.subnetId}
-                  onValueChange={(value) => {
-                    const subnet = options.subnets.find((item) => item.id === value);
-                    const gateway = options.gateways.find(
-                      (item) => item.tenantId === null || item.tenantId === subnet?.network.tenantId,
-                    );
-                    const zone = options.dnsZones.find(
-                      (item) => item.tenantId === subnet?.network.tenantId,
-                    );
-                    setForm({
-                      ...form,
-                      subnetId: value,
-                      gatewayId: gateway?.id ?? "",
-                      dnsZoneId: zone?.id ?? "",
-                    });
-                  }}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {options.subnets.map((subnet) => (
-                      <SelectItem key={subnet.id} value={subnet.id}>
-                        {subnet.network.tenant.name} / {subnet.network.name} / {subnet.name} ({subnet.cidr})
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
               </Field>
               <div className="col-span-2">
                 <Field label={t("ciSshKeys")}>
@@ -369,7 +357,7 @@ export function AdminTicketActions({
                   />
                 </Field>
               </div>
-              <div className="col-span-2 border-t border-neutral-200 pt-3">
+              {externalAccessSupported && <div className="col-span-2 border-t border-neutral-200 pt-3">
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <Label>{t("externalAccess")}</Label>
@@ -380,8 +368,8 @@ export function AdminTicketActions({
                     onCheckedChange={(checked) => setForm({ ...form, externalEnabled: checked })}
                   />
                 </div>
-              </div>
-              {form.externalEnabled && (
+              </div>}
+              {externalAccessSupported && form.externalEnabled && (
                 <>
                   <Field label={t("reverseProxyGateway")}>
                     <Select
@@ -470,13 +458,15 @@ export function AdminTicketActions({
             <Button
               disabled={
                 busy ||
+                !options?.workflow ||
                 !form.pveNodeId ||
                 !form.vmid ||
                 !form.internalIp ||
+                !/^[a-z_][a-z0-9_-]{0,31}$/.test(form.ciUser) ||
+                form.initialPassword.length < 8 ||
                 (form.configureSecurityGroup && !form.securityGroup) ||
                 !form.leaseDurationDays ||
                 (form.externalEnabled && (
-                  !form.subnetId ||
                   !form.gatewayId ||
                   !form.internalPort ||
                   (form.protocol === "TCP" ? !form.externalPort : !form.hostname)
@@ -500,14 +490,13 @@ export function AdminTicketActions({
                     vmid: Number(form.vmid),
                     internalIp: form.internalIp,
                     ciUser: form.ciUser,
+                    initialPassword: form.initialPassword,
                     sshKeys: form.sshKeys,
                     nameserver: form.nameserver,
                     ipconfig: form.ipconfig,
                     configureSecurityGroup: form.configureSecurityGroup,
                     securityGroup: form.securityGroup,
-                    configureJumpServer: form.configureJumpServer,
                     leaseDurationDays: Number(form.leaseDurationDays),
-                    subnetId: form.subnetId || undefined,
                     externalAccess,
                   })
                 ) {

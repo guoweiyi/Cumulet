@@ -7,12 +7,11 @@ import type {
 } from "@prisma/client";
 import { prisma } from "./prisma";
 import { pveClient, PveClient } from "./pve";
-import { jumpServerClient, JumpServerError } from "./jumpserver";
+import { jumpServerClient, jumpServerLunaUrl, JumpServerError } from "./jumpserver";
 import { getSetting } from "./settings";
 import { audit } from "./audit";
 import { addSystemMessage } from "./tickets";
-import { encryptSecret, hashToken, randomToken } from "./crypto";
-import { generateVmPassword } from "./vm";
+import { decryptSecret, encryptSecret, hashToken, randomToken } from "./crypto";
 import { BASELINE_MARK, type BaselineRule } from "./firewall";
 import { emailProvisioned, emailStepFailedToAdmins } from "./emails";
 import { getHypervisorProvider, type IHypervisorProvider } from "./providers";
@@ -43,7 +42,7 @@ type StepContext = {
   pve: PveClient;
   provider: IHypervisorProvider;
   actorId: string;
-  /** Cloud-init password generated this run — kept in-memory only for NOTIFY. */
+  /** Decrypted only for the active run; the database stores ciphertext. */
   runState: { ciPassword?: string; assetName: string };
 };
 
@@ -56,7 +55,6 @@ function provisionMeta(binding: BindingFull): Record<string, unknown> {
 function shouldRunStep(binding: BindingFull, step: ProvisioningStepType): boolean {
   const meta = provisionMeta(binding);
   if (step === "PVE_SECURITY_GROUP") return meta.configureSecurityGroup !== false && !!binding.pveSecurityGroup;
-  if (step === "JS_ASSET" || step === "JS_PERMISSION") return meta.configureJumpServer !== false;
   if (step === "EXTERNAL_ACCESS") return !!meta.externalAccess;
   return true;
 }
@@ -108,8 +106,8 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
   },
 
   async CLOUD_INIT({ binding, provider, runState }) {
-    const password = generateVmPassword();
-    runState.ciPassword = password;
+    const password = runState.ciPassword;
+    if (!password) throw new Error("initial_password_missing");
     // ipconfig / nameserver come from admin-provided values captured at approve.
     const meta = provisionMeta(binding) as Record<string, string>;
     await provider.provision({
@@ -210,6 +208,14 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
     const js = await jumpServerClient(binding.boundById);
     const settings = await getSetting("jumpserver");
     const name = runState.assetName;
+    const ticket = await prisma.ticket.findUnique({
+      where: { id: binding.ticketId },
+      include: { user: true },
+    });
+    if (!ticket) throw new Error("ticket_missing");
+    const userNode = await js.ensureUserAssetNode(
+      ticket.user.realName ?? ticket.user.nickname ?? ticket.user.email,
+    );
 
     // Idempotent: reuse an existing asset with the same address.
     let assetId = binding.jsAssetId;
@@ -221,10 +227,12 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
       const host = await js.createHost({
         name,
         address: binding.internalIp,
-        nodeId: settings?.assetNodeId ?? "",
+        nodeId: userNode.id,
         accountTemplate: settings?.defaultAccountUsername ? undefined : undefined,
       });
       assetId = host.id;
+    } else {
+      await js.setHostNode(assetId, userNode.id);
     }
     await prisma.resourceBinding.update({
       where: { id: binding.id },
@@ -281,11 +289,12 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
       include: { user: true },
     });
     if (!ticket) throw new Error("ticket_missing");
-    const provisioning = await getSetting("provisioning");
+    const jumpserver = await getSetting("jumpserver");
+    const jsPortalUrl = jumpserver?.baseUrl ? jumpServerLunaUrl(jumpserver.baseUrl) : "";
 
     // One-time credential link (only when a fresh password exists this run).
     let credentialUrl = `${(process.env.NEXTAUTH_URL ?? "http://localhost:3000").replace(/\/$/, "")}/servers/${binding.id}`;
-    if (runState.ciPassword) {
+    if (runState.ciPassword && !binding.initialPasswordDeliveredAt) {
       const token = randomToken(32);
       await prisma.oneTimeCredential.create({
         data: {
@@ -296,7 +305,7 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
               user: binding.cloudInitUser,
               password: runState.ciPassword,
               ip: binding.internalIp,
-              jsPortalUrl: provisioning?.portalUrl ?? "",
+              jsPortalUrl,
             }),
           ),
           expiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
@@ -312,7 +321,7 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
     await emailProvisioned(ticket.user.id, ticket.user.email, {
       ticketId: ticket.id,
       credentialUrl,
-      jsPortalUrl: provisioning?.portalUrl ?? "",
+      jsPortalUrl,
       assetName: runState.assetName,
     });
   },
@@ -360,16 +369,27 @@ async function makeContext(binding: BindingFull, actorId: string): Promise<StepC
     pve: pveClient(binding.pveNode, actorId),
     provider: await getHypervisorProvider(binding.resource.providerId, actorId),
     actorId,
-    runState: { assetName: binding.resource.displayName },
+    runState: {
+      assetName: binding.resource.displayName,
+      ciPassword: binding.initialPasswordEnc ? decryptSecret(binding.initialPasswordEnc) : undefined,
+    },
   };
+}
+
+async function bindingStepOrder(bindingId: string): Promise<ProvisioningStepType[]> {
+  const steps = await prisma.provisioningStep.findMany({
+    where: { bindingId },
+    orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+    select: { step: true },
+  });
+  return steps.map((entry) => entry.step);
 }
 
 /** Recompute ticket status from the full set of steps. */
 async function reconcileTicketStatus(bindingId: string, ticketId: string): Promise<void> {
   const steps = await prisma.provisioningStep.findMany({ where: { bindingId } });
-  const byStep = new Map(steps.map((s) => [s.step, s.status]));
-  const allDone = STEP_ORDER.every(
-    (s) => byStep.get(s) === "SUCCESS" || byStep.get(s) === "SKIPPED",
+  const allDone = steps.length > 0 && steps.every(
+    (entry) => entry.status === "SUCCESS" || entry.status === "SKIPPED",
   );
   if (allDone) {
     const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
@@ -406,7 +426,8 @@ async function continuePipeline(
   ctx: StepContext,
   startIndex: number,
 ): Promise<boolean> {
-  for (const step of STEP_ORDER.slice(startIndex)) {
+  const order = await bindingStepOrder(ctx.binding.id);
+  for (const step of order.slice(startIndex)) {
     const existing = await prisma.provisioningStep.findUnique({
       where: { bindingId_step: { bindingId: ctx.binding.id, step } },
     });
@@ -441,7 +462,8 @@ export async function retryStep(
   const ctx = await makeContext(binding, actorId);
   const ok = await runStep(ctx, step);
   if (!ok) return;
-  const idx = STEP_ORDER.indexOf(step);
+  const idx = (await bindingStepOrder(bindingId)).indexOf(step);
+  if (idx < 0) throw new Error("step_not_found");
   await continuePipeline(ctx, idx + 1);
 }
 
@@ -467,5 +489,7 @@ export async function skipStep(
     targetId: bindingId,
     metadata: { step },
   });
-  await continuePipeline(ctx, STEP_ORDER.indexOf(step) + 1);
+  const idx = (await bindingStepOrder(bindingId)).indexOf(step);
+  if (idx < 0) throw new Error("step_not_found");
+  await continuePipeline(ctx, idx + 1);
 }

@@ -10,10 +10,9 @@ export const GET = api<Ctx>(async (_req, ctx) => {
   const { id } = await ctx.params;
   const { binding, client } = await vmContext(id);
   try {
-    const [status, config, fwOptions, resizeRequest] = await Promise.all([
+    const [status, config, resizeRequest] = await Promise.all([
       client.vmStatus(binding.vmid),
       client.vmConfig(binding.vmid),
-      client.getVmFirewallOptions(binding.vmid).catch(() => ({ enable: 0 })),
       prisma.resourceResizeRequest.findFirst({
         where: { resourceId: binding.resourceId, status: { in: ["PENDING", "APPLYING"] } },
         orderBy: { createdAt: "desc" },
@@ -48,7 +47,6 @@ export const GET = api<Ctx>(async (_req, ctx) => {
         diskKey: disk?.key ?? null,
         ciUser: binding.cloudInitUser,
       },
-      firewallEnabled: fwOptions.enable === 1,
       quota,
       resizeRequest,
     });

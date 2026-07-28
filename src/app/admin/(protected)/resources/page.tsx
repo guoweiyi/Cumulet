@@ -3,8 +3,10 @@ import { getTranslations } from "next-intl/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/guards";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { STATUS_BADGE } from "@/components/ticket-status";
+import { Settings2 } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -43,6 +45,7 @@ export default async function AdminResourcesPage() {
                 <TableHead>{tt("status.ACTIVE")}</TableHead>
                 <TableHead>{tr("user")}</TableHead>
                 <TableHead>{tr("bastion")}</TableHead>
+                <TableHead className="w-12" />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -72,11 +75,18 @@ export default async function AdminResourcesPage() {
                       <span className="text-xs text-neutral-400">—</span>
                     )}
                   </TableCell>
+                  <TableCell>
+                    <Button asChild size="icon" variant="ghost" title={tr("manage")}>
+                      <Link href={`/admin/resources/${b.id}/manage`}>
+                        <Settings2 className="size-4" />
+                      </Link>
+                    </Button>
+                  </TableCell>
                 </TableRow>
               ))}
               {bindings.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={6} className="py-10 text-center text-sm text-neutral-400">
+                  <TableCell colSpan={7} className="py-10 text-center text-sm text-neutral-400">
                     {tr("empty")}
                   </TableCell>
                 </TableRow>

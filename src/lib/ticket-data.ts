@@ -30,6 +30,7 @@ export type TicketDetailData = {
     steps: {
       step: ProvisioningStepType;
       status: ProvisioningStepStatus;
+      position: number;
       errorMessage: string | null;
       startedAt: string | null;
       finishedAt: string | null;
@@ -55,7 +56,7 @@ export async function getTicketDetail(ticketId: string, forAdmin: boolean): Prom
       binding: {
         include: {
           pveNode: { select: { name: true } },
-          steps: { orderBy: { createdAt: "asc" } },
+          steps: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
         },
       },
       sourceInspection: { select: { id: true } },
@@ -96,6 +97,7 @@ export async function getTicketDetail(ticketId: string, forAdmin: boolean): Prom
           steps: ticket.binding.steps.map((s) => ({
             step: s.step,
             status: s.status,
+            position: s.position,
             errorMessage: s.errorMessage,
             startedAt: s.startedAt?.toISOString() ?? null,
             finishedAt: s.finishedAt?.toISOString() ?? null,

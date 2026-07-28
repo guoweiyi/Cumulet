@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { LanguageSwitcher } from "@/components/language-switcher";
 import { passwordLogin as passwordLoginAction } from "@/actions/auth";
+import { useOidcStatus } from "@/hooks/use-oidc-status";
 
 function AdminLoginInner() {
   const t = useTranslations("auth");
@@ -21,6 +22,7 @@ function AdminLoginInner() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const oidc = useOidcStatus();
   const rawCallback = params.get("callbackUrl") ?? "/admin";
   // Only same-origin relative paths — never redirect off-site.
   const callbackUrl = rawCallback.startsWith("/") && !rawCallback.startsWith("//") ? rawCallback : "/admin";
@@ -125,10 +127,10 @@ function AdminLoginInner() {
             </Button>
             <Button
               variant="outline"
-              disabled={busy}
+              disabled={busy || !oidc?.enabled}
               onClick={() => signIn("oidc", { callbackUrl })}
             >
-              <LogIn className="size-4" /> SSO
+              <LogIn className="size-4" /> {oidc?.providerName ?? "SSO"}
             </Button>
           </div>
         </CardContent>

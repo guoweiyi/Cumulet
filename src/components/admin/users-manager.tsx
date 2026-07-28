@@ -38,6 +38,7 @@ type UserRow = {
   email: string;
   nickname: string | null;
   realName: string | null;
+  studentId: string | null;
   role: string;
   preferredLocale: string;
   hasPassword: boolean;
@@ -93,6 +94,8 @@ export function UsersManager({
         user_has_resources: t("userHasResources"),
         email_taken: t("emailTaken"),
         realname_immutable: t("realNameImmutable"),
+        student_id_immutable: t("studentIdImmutable"),
+        student_id_in_use: t("studentIdInUse"),
         password_requires_admin_role: t("passwordRequiresAdminRole"),
         weak_password: t("weakPassword"),
         forbidden: tc("forbidden"),
@@ -134,7 +137,7 @@ export function UsersManager({
             <TableHeader>
               <TableRow>
                 <TableHead>{tc("name")}</TableHead>
-                <TableHead>{t("realName")}</TableHead>
+                <TableHead>{t("identity")}</TableHead>
                 <TableHead>{t("role")}</TableHead>
                 <TableHead>{t("quota")}</TableHead>
                 <TableHead>{t("resourcesCol")}</TableHead>
@@ -148,7 +151,10 @@ export function UsersManager({
                     <div className="font-medium">{u.nickname ?? u.email}</div>
                     <div className="text-xs text-muted-foreground/70">{u.email}</div>
                   </TableCell>
-                  <TableCell>{u.realName ?? "—"}</TableCell>
+                  <TableCell>
+                    <div>{u.realName ?? "—"}</div>
+                    <div className="font-mono text-xs text-muted-foreground">{u.studentId ?? "—"}</div>
+                  </TableCell>
                   <TableCell>
                     {canGrantRoles ? (
                       <Select
@@ -270,11 +276,13 @@ function UserFormDialog({
     email: user?.email ?? "",
     nickname: user?.nickname ?? "",
     realName: user?.realName ?? "",
+    studentId: user?.studentId ?? "",
     role: user?.role ?? "USER",
     preferredLocale: user?.preferredLocale ?? "zh",
     password: "",
   });
   const realNameLocked = mode === "edit" && !!user?.realName;
+  const studentIdLocked = mode === "edit" && !!user?.studentId;
   const adminRole = form.role !== "USER";
 
   function submit() {
@@ -286,6 +294,7 @@ function UserFormDialog({
     if (mode === "create") body.email = form.email;
     else if (form.email && form.email !== user?.email) body.email = form.email;
     if (!realNameLocked && form.realName) body.realName = form.realName;
+    if (!studentIdLocked && form.studentId) body.studentId = form.studentId;
     if (form.password) body.password = form.password;
     onSubmit(body);
   }
@@ -319,6 +328,14 @@ function UserFormDialog({
               value={form.realName}
               disabled={realNameLocked}
               onChange={(e) => setForm({ ...form, realName: e.target.value })}
+            />
+          </Field>
+          <Field label={t("studentId")} hint={studentIdLocked ? undefined : t("studentIdLockedHint")}>
+            <Input
+              inputMode="numeric"
+              value={form.studentId}
+              disabled={studentIdLocked}
+              onChange={(e) => setForm({ ...form, studentId: e.target.value.replace(/\D/g, "") })}
             />
           </Field>
           {canGrantRoles && <Field label={t("role")}>

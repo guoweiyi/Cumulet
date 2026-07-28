@@ -27,6 +27,33 @@ export class JumpServerError extends Error {
 }
 
 const TIMEOUT_MS = 15_000;
+const SHARED_ASSET_ROOT = "/DEFAULT/共享区";
+
+type JumpServerNode = {
+  id: string;
+  value: string;
+  full_value: string;
+};
+
+function listResults<T>(value: T[] | { results?: T[] }): T[] {
+  return Array.isArray(value) ? value : (value.results ?? []);
+}
+
+function userNodeName(value: string): string {
+  return value
+    .trim()
+    .replace(/[\\/\u0000-\u001f\u007f]/g, "_")
+    .replace(/_+/g, "_")
+    .slice(0, 64);
+}
+
+export function jumpServerUserAssetPath(displayName: string): string {
+  return `${SHARED_ASSET_ROOT}/${userNodeName(displayName)}`;
+}
+
+export function jumpServerLunaUrl(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/luna/`;
+}
 
 export class JumpServerClient {
   private base: string;
@@ -66,7 +93,7 @@ export class JumpServerClient {
   }
 
   private async request<T>(
-    method: "GET" | "POST" | "PUT" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
     path: string,
     body?: unknown,
   ): Promise<T> {
@@ -144,6 +171,40 @@ export class JumpServerClient {
     return match ? { id: match.id } : null;
   }
 
+  private async findNodeByPath(path: string): Promise<JumpServerNode | null> {
+    const leaf = path.split("/").filter(Boolean).at(-1) ?? "";
+    const response = await this.request<JumpServerNode[] | { results?: JumpServerNode[] }>(
+      "GET",
+      `/api/v1/assets/nodes/?search=${encodeURIComponent(leaf)}&limit=100`,
+    );
+    return listResults(response).find((node) => node.full_value === path) ?? null;
+  }
+
+  /** Ensure the fixed shared-area child used to group one user's assets. */
+  async ensureUserAssetNode(displayName: string): Promise<{ id: string; path: string }> {
+    const nodeName = userNodeName(displayName);
+    if (!nodeName) throw new JumpServerError(400, "JumpServer user asset node name is empty");
+    const path = jumpServerUserAssetPath(displayName);
+    const existing = await this.findNodeByPath(path);
+    if (existing) return { id: existing.id, path };
+
+    const root = await this.findNodeByPath(SHARED_ASSET_ROOT);
+    if (!root) throw new JumpServerError(404, `JumpServer asset root ${SHARED_ASSET_ROOT} not found`);
+
+    try {
+      const created = await this.request<JumpServerNode>("POST", "/api/v1/assets/nodes/", {
+        value: nodeName,
+        full_value: path,
+      });
+      return { id: created.id, path };
+    } catch (error) {
+      if (!(error instanceof JumpServerError) || ![400, 409].includes(error.status)) throw error;
+      const raced = await this.findNodeByPath(path);
+      if (!raced) throw error;
+      return { id: raced.id, path };
+    }
+  }
+
   async createHost(opts: {
     name: string;
     address: string;
@@ -160,6 +221,10 @@ export class JumpServerClient {
     if (opts.accountTemplate) body.accounts = [{ template: opts.accountTemplate }];
     const host = await this.request<{ id: string }>("POST", "/api/v1/assets/hosts/", body);
     return { id: host.id };
+  }
+
+  async setHostNode(id: string, nodeId: string): Promise<void> {
+    await this.request("PATCH", `/api/v1/assets/hosts/${id}/`, { nodes: [nodeId] });
   }
 
   async deleteHost(id: string): Promise<void> {

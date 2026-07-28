@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { BrainCircuit, Loader2, Mail, Plug, Server, Shield } from "lucide-react";
+import { BrainCircuit, KeyRound, Loader2, Mail, Plug, Server, Shield } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,6 +23,7 @@ type SettingsData = {
   jumpserver: Record<string, unknown> | null;
   provisioning: Record<string, unknown> | null;
   ai: Record<string, unknown> | null;
+  oidc: Record<string, unknown> | null;
   defaultQuota: Record<string, unknown>;
 };
 
@@ -63,12 +64,75 @@ export function SettingsManager() {
 
   return (
     <div className="max-w-3xl space-y-6">
+      <OidcSection data={data.oidc} onSave={(v) => save("oidc", v)} />
       <SmtpSection data={data.smtp} onSave={(v) => save("smtp", v)} />
       <JumpServerSection data={data.jumpserver} onSave={(v) => save("jumpserver", v)} />
       <ProvisioningSection data={data.provisioning} onSave={(v) => save("provisioning", v)} />
       <AiSection data={data.ai} onSave={(v) => save("ai", v)} />
       <QuotaSection data={data.defaultQuota} onSave={(v) => save("defaultQuota", v)} />
     </div>
+  );
+}
+
+function OidcSection({
+  data,
+  onSave,
+}: {
+  data: Record<string, unknown> | null;
+  onSave: (value: unknown) => Promise<boolean>;
+}) {
+  const t = useTranslations("admin.settings");
+  const tc = useTranslations("common");
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({
+    enabled: (data?.enabled as boolean) ?? false,
+    providerName: (data?.providerName as string) ?? "SSO",
+    issuer: (data?.issuer as string) ?? "",
+    clientId: (data?.clientId as string) ?? "",
+    clientSecret: "",
+  });
+
+  async function test() {
+    if (!(await onSave(form))) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/admin/settings/test-oidc", { method: "POST" });
+      if (response.ok) toast.success(tc("connectionOk"));
+      else toast.error(tc("connectionFailed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Section icon={<KeyRound className="size-4 text-blue-700" />} title={t("oidc")}>
+      <Row label={t("oidcEnabled")}>
+        <Switch checked={form.enabled} onCheckedChange={(enabled) => setForm({ ...form, enabled })} />
+      </Row>
+      <Row label={t("oidcProviderName")}>
+        <Input value={form.providerName} onChange={(event) => setForm({ ...form, providerName: event.target.value })} />
+      </Row>
+      <Row label={t("oidcIssuer")}>
+        <Input value={form.issuer} placeholder="https://sso.example.com" onChange={(event) => setForm({ ...form, issuer: event.target.value })} />
+      </Row>
+      <Row label={t("oidcClientId")}>
+        <Input value={form.clientId} onChange={(event) => setForm({ ...form, clientId: event.target.value })} />
+      </Row>
+      <Row label={t("oidcClientSecret")}>
+        <div className="flex items-center gap-2">
+          <Input type="password" value={form.clientSecret} placeholder={t("secretKeepHint")} onChange={(event) => setForm({ ...form, clientSecret: event.target.value })} />
+          <SecretBadge set={data?.clientSecretSet as boolean} />
+        </div>
+      </Row>
+      <p className="text-xs text-muted-foreground">{t("oidcHint")}</p>
+      <div className="flex gap-2">
+        <Button onClick={() => onSave(form)}>{tc("save")}</Button>
+        <Button variant="outline" disabled={busy || !form.enabled} onClick={test}>
+          {busy ? <Loader2 className="size-4 animate-spin" /> : <Plug className="size-4" />}
+          {tc("testConnection")}
+        </Button>
+      </div>
+    </Section>
   );
 }
 
@@ -261,7 +325,6 @@ function JumpServerSection({ data, onSave }: { data: Record<string, unknown> | n
     privateToken: "",
     accessKeyId: (data?.accessKeyId as string) ?? "",
     accessKeySecret: "",
-    assetNodeId: (data?.assetNodeId as string) ?? "",
     defaultAccountUsername: (data?.defaultAccountUsername as string) ?? "",
     autoCreateUsers: (data?.autoCreateUsers as boolean) ?? false,
   });
@@ -317,9 +380,6 @@ function JumpServerSection({ data, onSave }: { data: Record<string, unknown> | n
           </Row>
         </>
       )}
-      <Row label={t("jsAssetNode")}>
-        <Input value={form.assetNodeId} onChange={(e) => setForm({ ...form, assetNodeId: e.target.value })} />
-      </Row>
       <Row label={t("jsAccount")}>
         <Input value={form.defaultAccountUsername} placeholder="root / @ALL" onChange={(e) => setForm({ ...form, defaultAccountUsername: e.target.value })} />
       </Row>
@@ -344,7 +404,6 @@ function ProvisioningSection({ data, onSave }: { data: Record<string, unknown> |
   const [form, setForm] = useState({
     defaultSecurityGroup: (data?.defaultSecurityGroup as string) ?? "",
     jumpServerInternalIp: (data?.jumpServerInternalIp as string) ?? "",
-    portalUrl: (data?.portalUrl as string) ?? "",
   });
 
   return (
@@ -354,9 +413,6 @@ function ProvisioningSection({ data, onSave }: { data: Record<string, unknown> |
       </Row>
       <Row label={t("jsInternalIp")}>
         <Input value={form.jumpServerInternalIp} placeholder="10.0.0.10" onChange={(e) => setForm({ ...form, jumpServerInternalIp: e.target.value })} />
-      </Row>
-      <Row label={t("jsPortalUrl")}>
-        <Input value={form.portalUrl} placeholder="https://jumpserver.example.com" onChange={(e) => setForm({ ...form, portalUrl: e.target.value })} />
       </Row>
       <Button onClick={() => onSave(form)}>{tc("save")}</Button>
     </Section>

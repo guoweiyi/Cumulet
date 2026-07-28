@@ -10,6 +10,7 @@ export type CurrentUser = {
   email: string;
   nickname: string | null;
   realName: string | null;
+  studentId: string | null;
   role: Role;
   preferredLocale: string;
 };
@@ -30,6 +31,7 @@ export const currentUser = cache(async (): Promise<CurrentUser | null> => {
       email: true,
       nickname: true,
       realName: true,
+      studentId: true,
       role: true,
       preferredLocale: true,
     },
@@ -66,10 +68,10 @@ export async function requireSuperAdmin(): Promise<CurrentUser> {
   return user;
 }
 
-/** Fully-onboarded end user (realName set). */
+/** Fully-onboarded end user (immutable real name and student ID set). */
 export async function requireOnboardedUser(): Promise<CurrentUser> {
   const user = await requireUser();
-  if (user.realName === null) throw forbidden();
+  if (user.realName === null || user.studentId === null) throw forbidden();
   return user;
 }
 
