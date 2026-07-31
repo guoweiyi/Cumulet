@@ -2,7 +2,6 @@ node_modules
 .next
 .git
 .gitignore
-# Never bake host secrets into the image — runtime env comes from compose.
 .env
 .env.*
 !.env.example
@@ -17,6 +16,7 @@ CODE_OF_CONDUCT.md
 .claude
 tests
 vitest.config.ts
+scripts/build-and-push.sh
 Dockerfile
 .dockerignore
-docker-compose.yml
+deploy

@@ -39,6 +39,25 @@ Open `http://localhost:3000`. The `.env` only needs startup-level values such as
 
 The OIDC provider must return `sub`, `email`, and `email_verified = true`.
 
+## Docker deployment
+
+For production we recommend Docker. All deployment files live in
+[`deploy/`](./deploy/README.md) and support two modes:
+
+- **One-click with bundled MySQL** (`deploy/docker-compose.yml`): Compose starts MySQL 8 + the app.
+- **Existing database** (`deploy/docker-compose.external-db.yml`): connect an existing MySQL 8 instance.
+
+```bash
+cd deploy
+cp .env.example .env
+# edit .env: NEXTAUTH_SECRET / APP_ENCRYPTION_KEY / MySQL vars or EXTERNAL_DATABASE_URL
+docker compose up -d          # mode A
+# docker compose -f docker-compose.external-db.yml up -d   # mode B
+```
+
+See [deploy/README.md](./deploy/README.md) for detailed steps, admin bootstrap,
+upgrades, and troubleshooting.
+
 ## Commands
 
 | Command | Purpose |

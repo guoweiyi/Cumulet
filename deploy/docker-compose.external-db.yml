@@ -1,0 +1,44 @@
+# =============================================================================
+# Cumulet — deployment against an EXISTING MySQL 8 database
+#
+#   cd deploy
+#   cp .env.example .env
+#   # set EXTERNAL_DATABASE_URL (the hostname is resolved by the Docker host;
+#   # use host.docker.internal for a database on the host machine)
+#   docker compose -f docker-compose.external-db.yml up -d
+#
+# The container runs `prisma migrate deploy` on startup and then starts the
+# app. The external database must be MySQL 8 and reachable from the container.
+# =============================================================================
+name: cumulet-external-db
+
+services:
+  app:
+    image: ${IMAGE:-xiaoxiaoyunmiao/cumulet:latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${EXTERNAL_DATABASE_URL:?set EXTERNAL_DATABASE_URL in .env}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET in .env}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?set APP_ENCRYPTION_KEY (64 hex chars) in .env}
+      DEFAULT_LOCALE: ${DEFAULT_LOCALE:-zh}
+      AI_CRON_ENABLED: ${AI_CRON_ENABLED:-true}
+      LIFECYCLE_CRON_ENABLED: ${LIFECYCLE_CRON_ENABLED:-true}
+      ALLOW_PRIVATE_OUTBOUND_WEBHOOKS: ${ALLOW_PRIVATE_OUTBOUND_WEBHOOKS:-false}
+      # First-boot seeding (set to true once, then unset):
+      SEED_ON_START: ${SEED_ON_START:-false}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - app_data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  app_data:

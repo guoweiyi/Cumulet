@@ -74,6 +74,12 @@ export type AgreementSettings = {
   linkUrl: string; // http(s) URL of the agreement page
 };
 
+export type GithubSettings = {
+  enabled: boolean; // show the GitHub project entry on the portal dashboard
+  repoUrl: string; // http(s) URL of the GitHub repository
+  repoName: string; // display name; empty = fall back to the repository URL
+};
+
 type SettingsMap = {
   smtp: SmtpSettings;
   jumpserver: JumpServerSettings;
@@ -83,6 +89,7 @@ type SettingsMap = {
   oidc: OidcSettings;
   branding: BrandingSettings;
   agreement: AgreementSettings;
+  github: GithubSettings;
 };
 
 const SECRET_FIELDS: Record<keyof SettingsMap, string[]> = {
@@ -94,6 +101,7 @@ const SECRET_FIELDS: Record<keyof SettingsMap, string[]> = {
   oidc: ["clientSecret"],
   branding: [],
   agreement: [],
+  github: [],
 };
 
 export const BRANDING_DEFAULTS: BrandingSettings = {
@@ -108,6 +116,12 @@ export const AGREEMENT_DEFAULTS: AgreementSettings = {
   labelTemplate: "我已阅读并同意 {link}",
   linkText: "《用户协议》",
   linkUrl: "",
+};
+
+export const GITHUB_DEFAULTS: GithubSettings = {
+  enabled: false,
+  repoUrl: "",
+  repoName: "",
 };
 
 export const DEFAULTS: { defaultQuota: DefaultQuotaSettings } = {
@@ -193,6 +207,12 @@ export async function getBranding(): Promise<BrandingSettings> {
 export async function getAgreement(): Promise<AgreementSettings> {
   const stored = await getSetting("agreement");
   return { ...AGREEMENT_DEFAULTS, ...(stored ?? {}) };
+}
+
+/** GitHub project entry settings with defaults. */
+export async function getGithub(): Promise<GithubSettings> {
+  const stored = await getSetting("github");
+  return { ...GITHUB_DEFAULTS, ...(stored ?? {}) };
 }
 
 /** DB configuration wins; environment values are a migration fallback only. */

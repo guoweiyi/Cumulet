@@ -62,7 +62,13 @@ async function main() {
 main()
   .then(() => prisma.$disconnect())
   .catch(async (e) => {
-    console.error(e);
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`[seed] Seeding failed:\n${message}`);
+    // Raw stack only when explicitly requested — operators get the actionable
+    // message above by default instead of a tsx sourcemap trace.
+    if (process.env.SEED_DEBUG_STACK === "true" && e instanceof Error && e.stack) {
+      console.error(e.stack);
+    }
     await prisma.$disconnect();
     process.exit(1);
   });

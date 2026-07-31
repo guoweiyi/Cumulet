@@ -1,8 +1,9 @@
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
-import { ArrowRight, ChevronRight, FileText, Server, Shield, Ticket } from "lucide-react";
+import { ArrowRight, ChevronRight, ExternalLink, FileText, GitFork, Server, Shield, Ticket } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/guards";
+import { getGithub } from "@/lib/settings";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { STATUS_BADGE } from "@/components/ticket-status";
@@ -41,6 +42,7 @@ export default async function DashboardPage() {
       take: 5,
     }),
   ]);
+  const github = await getGithub();
 
   return (
     <div className="mx-auto max-w-5xl space-y-8">
@@ -50,6 +52,31 @@ export default async function DashboardPage() {
         </h1>
         <p className="text-sm text-muted-foreground">{t("welcomeSub")}</p>
       </header>
+
+      {github.enabled && github.repoUrl && (
+        <section className="space-y-3">
+          <h2 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            {t("githubProject")}
+          </h2>
+          <Link
+            href={github.repoUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="group flex items-center gap-3 rounded-xl border bg-card p-4 shadow-card transition-all hover:border-brand/40 hover:shadow-card-hover"
+          >
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border bg-secondary/60">
+              <GitFork className="size-[18px] text-neutral-700" strokeWidth={1.75} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium">{github.repoName || github.repoUrl}</div>
+              <div className="truncate text-xs text-muted-foreground">
+                {github.repoName ? github.repoUrl : t("githubProjectDesc")}
+              </div>
+            </div>
+            <ExternalLink className="size-4 shrink-0 text-muted-foreground/50 transition-colors group-hover:text-brand" />
+          </Link>
+        </section>
+      )}
 
       <section>
         <h2 className="mb-3 text-xs font-medium uppercase tracking-wider text-muted-foreground">

@@ -117,8 +117,10 @@
     "quickTickets": "My Tickets",
     "quickTicketsDesc": "Track your requests",
     "quickFirewall": "Firewall",
-    "quickFirewallDesc": "Configure security rules",
-    "myResources": "My Resources",
+      "quickFirewallDesc": "Configure security rules",
+      "githubProject": "Open Source Project",
+      "githubProjectDesc": "Browse the source code — stars and contributions welcome",
+      "myResources": "My Resources",
     "noResources": "No resources yet — click \"Request Resources\" to get started",
     "viewAll": "View all",
     "openTickets": "Open tickets"
@@ -739,7 +741,12 @@
       "agreementLinkText": "Link text",
       "agreementUrl": "Agreement URL",
       "agreementPreview": "Preview",
-      "agreementHint": "The label supports the {link} placeholder. Users must tick the checkbox to submit while enabled; the checkbox is hidden when disabled."
+      "agreementHint": "The label supports the {link} placeholder. Users must tick the checkbox to submit while enabled; the checkbox is hidden when disabled.",
+      "github": "GitHub Project",
+      "githubEnabled": "Show GitHub project",
+      "githubUrl": "Repository URL",
+      "githubName": "Display name",
+      "githubHint": "When enabled, the portal dashboard shows a GitHub project entry so users can reach the source code."
     },
     "ai": {
       "title": "AI Inspection History",

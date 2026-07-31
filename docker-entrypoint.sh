@@ -18,11 +18,14 @@ done
 # Optionally seed a SUPER_ADMIN + the default form on first boot.
 if [ "${SEED_ON_START:-false}" = "true" ]; then
   if [ -z "${SEED_ADMIN_EMAIL:-}" ] || [ -z "${SEED_ADMIN_PASSWORD:-}" ]; then
-    echo "[entrypoint] SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD are required when SEED_ON_START=true." >&2
+    echo "[entrypoint] SEED_ON_START=true requires SEED_ADMIN_EMAIL and a 12+ character SEED_ADMIN_PASSWORD (letters + numbers). Fix .env, then run: docker compose up -d" >&2
     exit 1
   fi
   echo "[entrypoint] seeding (idempotent)..."
-  ./node_modules/.bin/tsx prisma/seed.ts
+  if ! ./node_modules/.bin/tsx prisma/seed.ts; then
+    echo "[entrypoint] seeding failed. Fix the SEED_ADMIN_* values in .env, then restart with: docker compose up -d" >&2
+    exit 1
+  fi
 fi
 
 echo "[entrypoint] starting Cumulet..."

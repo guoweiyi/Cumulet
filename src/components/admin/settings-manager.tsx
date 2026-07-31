@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { BrainCircuit, FileText, ImagePlus, KeyRound, Loader2, Mail, Palette, Plug, Server, Shield, Trash2 } from "lucide-react";
+import { BrainCircuit, FileText, GitFork, ImagePlus, KeyRound, Loader2, Mail, Palette, Plug, Server, Shield, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,6 +27,7 @@ type SettingsData = {
   defaultQuota: Record<string, unknown>;
   branding: Record<string, unknown> | null;
   agreement: Record<string, unknown> | null;
+  github: Record<string, unknown> | null;
 };
 
 export function SettingsManager() {
@@ -68,6 +69,7 @@ export function SettingsManager() {
     <div className="max-w-3xl space-y-6">
       <BrandingSection data={data.branding} onSave={(v) => save("branding", v)} />
       <AgreementSection data={data.agreement} onSave={(v) => save("agreement", v)} />
+      <GithubSection data={data.github} onSave={(v) => save("github", v)} />
       <OidcSection data={data.oidc} onSave={(v) => save("oidc", v)} />
       <SmtpSection data={data.smtp} onSave={(v) => save("smtp", v)} />
       <JumpServerSection data={data.jumpserver} onSave={(v) => save("jumpserver", v)} />
@@ -75,6 +77,34 @@ export function SettingsManager() {
       <AiSection data={data.ai} onSave={(v) => save("ai", v)} />
       <QuotaSection data={data.defaultQuota} onSave={(v) => save("defaultQuota", v)} />
     </div>
+  );
+}
+
+// --- GitHub project ----------------------------------------------------------
+
+function GithubSection({ data, onSave }: { data: Record<string, unknown> | null; onSave: (v: unknown) => Promise<boolean> }) {
+  const t = useTranslations("admin.settings");
+  const tc = useTranslations("common");
+  const [form, setForm] = useState({
+    enabled: (data?.enabled as boolean) ?? false,
+    repoUrl: (data?.repoUrl as string) ?? "",
+    repoName: (data?.repoName as string) ?? "",
+  });
+
+  return (
+    <Section icon={<GitFork className="size-4 text-neutral-700" />} title={t("github")}>
+      <Row label={t("githubEnabled")}>
+        <Switch checked={form.enabled} onCheckedChange={(enabled) => setForm({ ...form, enabled })} />
+      </Row>
+      <Row label={t("githubUrl")}>
+        <Input value={form.repoUrl} placeholder="https://github.com/your-org/cumulet" disabled={!form.enabled} onChange={(e) => setForm({ ...form, repoUrl: e.target.value })} />
+      </Row>
+      <Row label={t("githubName")}>
+        <Input value={form.repoName} placeholder="Cumulet" disabled={!form.enabled} onChange={(e) => setForm({ ...form, repoName: e.target.value })} />
+      </Row>
+      <p className="text-xs text-muted-foreground">{t("githubHint")}</p>
+      <Button onClick={() => onSave(form)}>{tc("save")}</Button>
+    </Section>
   );
 }
 

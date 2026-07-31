@@ -65,7 +65,8 @@ COPY package.json next.config.mjs server.js docker-entrypoint.sh ./
 RUN groupadd --system --gid 1001 nodejs \
   && useradd --system --uid 1001 --gid nodejs --home-dir /app nextjs \
   && chmod +x docker-entrypoint.sh \
-  && chown -R nextjs:nodejs /app/.next
+  && mkdir -p /app/data \
+  && chown -R nextjs:nodejs /app/.next /app/data
 
 EXPOSE 3000
 USER nextjs

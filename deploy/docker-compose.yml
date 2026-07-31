@@ -1,3 +1,15 @@
+# =============================================================================
+# Cumulet — One-click deployment (bundled MySQL via Docker)
+#
+#   cd deploy
+#   cp .env.example .env   # fill in passwords / secrets
+#   docker compose up -d
+#
+# The app image is pulled from IMAGE (default: Docker Hub). Override it in .env if
+# you mirror the image to your own registry.
+# =============================================================================
+name: cumulet
+
 services:
   db:
     image: mysql:8.4
@@ -14,12 +26,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-    # Not published by default — only the app needs it. Uncomment to inspect.
+    # Not published by default — only the app needs it. Uncomment to inspect:
     # ports:
     #   - "3306:3306"
 
   app:
-    build: .
+    image: ${IMAGE:-xiaoxiaoyunmiao/cumulet:latest}
     restart: unless-stopped
     depends_on:
       db:
@@ -39,6 +51,8 @@ services:
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
     ports:
       - "${APP_PORT:-3000}:3000"
+    volumes:
+      - app_data:/app/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
@@ -48,3 +62,4 @@ services:
 
 volumes:
   db_data:
+  app_data:

@@ -11,12 +11,13 @@ import {
   getEffectiveOidcSettings,
   getBranding,
   getAgreement,
+  getGithub,
 } from "@/lib/settings";
 
 /** All settings, secrets stripped (write-only in the UI). SUPER_ADMIN only. */
 export const GET = api(async () => {
   await requireSuperAdmin();
-  const [smtp, jumpserver, provisioning, ai, oidc, defaultQuota, branding, agreement] = await Promise.all([
+  const [smtp, jumpserver, provisioning, ai, oidc, defaultQuota, branding, agreement, github] = await Promise.all([
     getSetting("smtp"),
     getSetting("jumpserver"),
     getSetting("provisioning"),
@@ -25,6 +26,7 @@ export const GET = api(async () => {
     getDefaultQuota(),
     getBranding(),
     getAgreement(),
+    getGithub(),
   ]);
   return json({
     smtp: toClientSafe("smtp", smtp),
@@ -35,6 +37,7 @@ export const GET = api(async () => {
     defaultQuota,
     branding,
     agreement,
+    github,
   });
 });
 
@@ -107,6 +110,25 @@ const agreementSchema = z
     }
   });
 
+function safeGithubUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return ["https:", "http:"].includes(url.protocol);
+  } catch {
+    return false;
+  }
+}
+
+const githubSchema = z.object({
+  enabled: z.boolean(),
+  repoUrl: z.string().trim().max(512).refine((u) => u === "" || safeGithubUrl(u)),
+  repoName: z.string().trim().max(128),
+}).superRefine((value, ctx) => {
+  if (value.enabled && !value.repoUrl) {
+    ctx.addIssue({ code: "custom", path: ["repoUrl"], message: "required" });
+  }
+});
+
 function safeAiBaseUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -158,7 +180,7 @@ const oidcSchema = z.object({
 });
 
 const bodySchema = z.object({
-  section: z.enum(["smtp", "jumpserver", "provisioning", "defaultQuota", "ai", "oidc", "branding", "agreement"]),
+  section: z.enum(["smtp", "jumpserver", "provisioning", "defaultQuota", "ai", "oidc", "branding", "agreement", "github"]),
   value: z.unknown(),
 });
 
@@ -221,6 +243,12 @@ export const PUT = api(async (req: NextRequest) => {
       const v = agreementSchema.safeParse(value);
       if (!v.success) throw badRequest("invalid_agreement");
       await setSetting("agreement", v.data, user.id);
+      break;
+    }
+    case "github": {
+      const v = githubSchema.safeParse(value);
+      if (!v.success) throw badRequest("invalid_github");
+      await setSetting("github", v.data, user.id);
       break;
     }
   }

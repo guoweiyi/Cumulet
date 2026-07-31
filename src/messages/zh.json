@@ -117,8 +117,10 @@
     "quickTickets": "我的工单",
     "quickTicketsDesc": "跟踪申请进度",
     "quickFirewall": "防火墙",
-    "quickFirewallDesc": "配置安全规则",
-    "myResources": "我的资源",
+      "quickFirewallDesc": "配置安全规则",
+      "githubProject": "开源项目",
+      "githubProjectDesc": "查看项目源码，欢迎 Star 与贡献",
+      "myResources": "我的资源",
     "noResources": "暂无云资源，点击「资源申请」开始申请",
     "viewAll": "查看全部",
     "openTickets": "进行中的工单"
@@ -739,7 +741,12 @@
       "agreementLinkText": "协议链接文字",
       "agreementUrl": "协议链接地址",
       "agreementPreview": "效果预览",
-      "agreementHint": "提示文字支持 {link} 占位符，提交申请时必须勾选；关闭后申请页不显示协议勾选。"
+      "agreementHint": "提示文字支持 {link} 占位符，提交申请时必须勾选；关闭后申请页不显示协议勾选。",
+      "github": "GitHub 项目",
+      "githubEnabled": "显示 GitHub 项目",
+      "githubUrl": "项目地址",
+      "githubName": "显示名称",
+      "githubHint": "开启后，门户首页会显示 GitHub 项目入口，便于用户访问项目源码。"
     },
     "ai": {
       "title": "AI 巡检记录",
