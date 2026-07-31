@@ -1,6 +1,4 @@
-# Cumulet 部署指南
-
-本目录包含 Cumulet 的 Docker 部署文件，支持两种形式：
+# 部署指南
 
 | 形式 | 文件 | 适用场景 |
 |---|---|---|
@@ -94,16 +92,9 @@ docker compose -f docker-compose.external-db.yml up -d
 
 ## 构建与发布镜像
 
-镜像由项目根目录的 [Dockerfile](../Dockerfile) 构建，通过 BuildKit 多架构打包：
-
 ```bash
-# 先登录目标仓库（Docker Hub / GHCR / 私有仓库）
 docker login
-
-# 构建 linux/amd64 + linux/arm64 并推送 VERSION 与 latest 两个标签
 ./scripts/build-and-push.sh
-
-# 自定义仓库 / 版本 / 平台
 IMAGE=myregistry/cumulet VERSION=0.3.0 ./scripts/build-and-push.sh
 PLATFORMS="linux/amd64" ./scripts/build-and-push.sh   # 只构建 x86
 ```
