@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { LanguageSwitcher } from "./language-switcher";
 import { UserMenu } from "./user-menu";
 import { Badge } from "@/components/ui/badge";
+import type { BrandingSettings } from "@/lib/settings";
 
 const NAV = [
   { href: "/admin", key: "overview", icon: Gauge, exact: true },
@@ -46,9 +47,11 @@ const NAV = [
 export function AdminShell({
   children,
   user,
+  branding,
 }: {
   children: ReactNode;
   user: { name: string; email: string; role: string };
+  branding: BrandingSettings;
 }) {
   const t = useTranslations("admin.nav");
   const tc = useTranslations("common");
@@ -59,8 +62,13 @@ export function AdminShell({
     <div className="flex min-h-screen flex-col">
       <header className="sticky top-0 z-40 flex h-12 items-center gap-3 border-b bg-neutral-900 px-4 text-white">
         <Link href="/admin" className="flex items-center gap-2 text-sm font-semibold">
-          <Cloud className="size-5 text-blue-400" />
-          {tc("appName")}
+          {branding.logoUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={branding.logoUrl} alt="" className="h-5 w-auto max-w-28 object-contain" />
+          ) : (
+            <Cloud className="size-5 text-blue-400" />
+          )}
+          {branding.appTitle || tc("appName")}
           <Badge variant="secondary" className="bg-neutral-700 text-neutral-200">
             Admin
           </Badge>
@@ -99,6 +107,24 @@ export function AdminShell({
         </aside>
         <main className="min-w-0 flex-1 p-6">{children}</main>
       </div>
+
+      <footer className="border-t border-border bg-card px-4 py-4">
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-1 text-center text-xs text-muted-foreground">
+          <p>
+            © {new Date().getFullYear()} {branding.appTitle || tc("appName")}
+          </p>
+          {branding.icpEnabled && branding.icpText && (
+            <a
+              href="https://beian.miit.gov.cn/"
+              target="_blank"
+              rel="noreferrer"
+              className="transition-colors hover:text-foreground"
+            >
+              {branding.icpText}
+            </a>
+          )}
+        </div>
+      </footer>
     </div>
   );
 }

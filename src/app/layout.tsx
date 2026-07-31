@@ -3,12 +3,22 @@ import { NextIntlClientProvider } from "next-intl";
 import { getLocale, getMessages } from "next-intl/server";
 import { Toaster } from "sonner";
 import { AuthSessionProvider } from "./providers";
+import { getBranding } from "@/lib/settings";
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: "栖云 Cumulet",
-  description: "栖云 Cumulet — self-service cloud console for Proxmox VE, with SSO, tickets, quotas and bastion access",
-};
+export async function generateMetadata(): Promise<Metadata> {
+  let title = "栖云 Cumulet";
+  try {
+    const branding = await getBranding();
+    if (branding.appTitle) title = branding.appTitle;
+  } catch {
+    // Settings unavailable (e.g. DB down at build time): keep the default title.
+  }
+  return {
+    title,
+    description: "栖云 Cumulet — self-service cloud console for Proxmox VE, with SSO, tickets, quotas and bastion access",
+  };
+}
 
 export default async function RootLayout({
   children,

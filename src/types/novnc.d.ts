@@ -10,6 +10,7 @@ declare module "@novnc/novnc" {
     disconnect(): void;
     sendCredentials(credentials: { password?: string }): void;
     sendCtrlAltDel(): void;
+    clipboardPasteFrom(text: string): void;
     scaleViewport: boolean;
     resizeSession: boolean;
     background: string;

@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { BrainCircuit, KeyRound, Loader2, Mail, Plug, Server, Shield } from "lucide-react";
+import { BrainCircuit, FileText, ImagePlus, KeyRound, Loader2, Mail, Palette, Plug, Server, Shield, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,6 +25,8 @@ type SettingsData = {
   ai: Record<string, unknown> | null;
   oidc: Record<string, unknown> | null;
   defaultQuota: Record<string, unknown>;
+  branding: Record<string, unknown> | null;
+  agreement: Record<string, unknown> | null;
 };
 
 export function SettingsManager() {
@@ -64,6 +66,8 @@ export function SettingsManager() {
 
   return (
     <div className="max-w-3xl space-y-6">
+      <BrandingSection data={data.branding} onSave={(v) => save("branding", v)} />
+      <AgreementSection data={data.agreement} onSave={(v) => save("agreement", v)} />
       <OidcSection data={data.oidc} onSave={(v) => save("oidc", v)} />
       <SmtpSection data={data.smtp} onSave={(v) => save("smtp", v)} />
       <JumpServerSection data={data.jumpserver} onSave={(v) => save("jumpserver", v)} />
@@ -71,6 +75,142 @@ export function SettingsManager() {
       <AiSection data={data.ai} onSave={(v) => save("ai", v)} />
       <QuotaSection data={data.defaultQuota} onSave={(v) => save("defaultQuota", v)} />
     </div>
+  );
+}
+
+// --- Agreement --------------------------------------------------------------
+
+function AgreementSection({ data, onSave }: { data: Record<string, unknown> | null; onSave: (v: unknown) => Promise<boolean> }) {
+  const t = useTranslations("admin.settings");
+  const tc = useTranslations("common");
+  const [form, setForm] = useState({
+    enabled: (data?.enabled as boolean) ?? false,
+    labelTemplate: (data?.labelTemplate as string) ?? "我已阅读并同意 {link}",
+    linkText: (data?.linkText as string) ?? "《用户协议》",
+    linkUrl: (data?.linkUrl as string) ?? "",
+  });
+
+  const parts = form.labelTemplate.split("{link}");
+
+  return (
+    <Section icon={<FileText className="size-4 text-amber-600" />} title={t("agreement")}>
+      <Row label={t("agreementEnabled")}>
+        <Switch checked={form.enabled} onCheckedChange={(enabled) => setForm({ ...form, enabled })} />
+      </Row>
+      <Row label={t("agreementLabel")}>
+        <Input value={form.labelTemplate} placeholder="我已阅读并同意 {link}" onChange={(e) => setForm({ ...form, labelTemplate: e.target.value })} />
+      </Row>
+      <Row label={t("agreementLinkText")}>
+        <Input value={form.linkText} placeholder="《用户协议》" onChange={(e) => setForm({ ...form, linkText: e.target.value })} />
+      </Row>
+      <Row label={t("agreementUrl")}>
+        <Input value={form.linkUrl} placeholder="https://example.com/terms" disabled={!form.enabled} onChange={(e) => setForm({ ...form, linkUrl: e.target.value })} />
+      </Row>
+      <Row label={t("agreementPreview")}>
+        <div className="flex items-center gap-2 rounded-md border bg-neutral-50 p-3 text-xs text-muted-foreground">
+          <input type="checkbox" checked={form.enabled} readOnly className="size-3.5 rounded border" />
+          <span>
+            {parts[0]}
+            {parts.length > 1 && (
+              <>
+                <a
+                  href={form.linkUrl || "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={form.linkUrl ? "font-medium text-blue-600 underline" : "cursor-not-allowed text-neutral-400"}
+                >
+                  {form.linkText}
+                </a>
+                {parts[1] ?? ""}
+              </>
+            )}
+          </span>
+        </div>
+      </Row>
+      <p className="text-xs text-muted-foreground">{t("agreementHint")}</p>
+      <Button onClick={() => onSave(form)}>{tc("save")}</Button>
+    </Section>
+  );
+}
+
+// --- Branding ---------------------------------------------------------------
+
+function BrandingSection({ data, onSave }: { data: Record<string, unknown> | null; onSave: (v: unknown) => Promise<boolean> }) {
+  const t = useTranslations("admin.settings");
+  const tc = useTranslations("common");
+  const [form, setForm] = useState({
+    appTitle: (data?.appTitle as string) ?? "",
+    logoUrl: (data?.logoUrl as string) ?? "",
+    icpEnabled: (data?.icpEnabled as boolean) ?? false,
+    icpText: (data?.icpText as string) ?? "",
+  });
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  function pickLogo(file?: File) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return toast.error(t("logoInvalid"));
+    if (file.size > 512 * 1024) return toast.error(t("logoTooLarge"));
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") setForm((f) => ({ ...f, logoUrl: reader.result as string }));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  const uploaded = form.logoUrl.startsWith("data:");
+
+  return (
+    <Section icon={<Palette className="size-4 text-violet-600" />} title={t("branding")}>
+      <Row label={t("appTitle")}>
+        <Input value={form.appTitle} placeholder={tc("appName")} onChange={(e) => setForm({ ...form, appTitle: e.target.value })} />
+      </Row>
+      <Row label={t("logo")}>
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <Input
+              value={uploaded ? t("logoDataUrl") : form.logoUrl}
+              readOnly={uploaded}
+              placeholder="https://example.com/logo.png"
+              onChange={(e) => setForm({ ...form, logoUrl: e.target.value })}
+            />
+            <Button type="button" variant="outline" size="sm" className="shrink-0" onClick={() => fileRef.current?.click()}>
+              <ImagePlus className="size-4" />
+              {t("logoUpload")}
+            </Button>
+            {form.logoUrl && (
+              <Button type="button" variant="ghost" size="icon" className="shrink-0" title={t("logoClear")} onClick={() => setForm({ ...form, logoUrl: "" })}>
+                <Trash2 className="size-4" />
+              </Button>
+            )}
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+              className="hidden"
+              onChange={(e) => {
+                pickLogo(e.target.files?.[0]);
+                e.target.value = "";
+              }}
+            />
+          </div>
+          {(uploaded || /^https?:\/\//.test(form.logoUrl)) && (
+            <div className="flex items-center gap-3 rounded-md border bg-neutral-50 p-2.5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={form.logoUrl} alt={t("logoPreview")} className="h-8 w-auto max-w-40 object-contain" />
+              <span className="text-xs text-muted-foreground">{t("logoHint")}</span>
+            </div>
+          )}
+        </div>
+      </Row>
+      <Row label={t("icpEnabled")}>
+        <Switch checked={form.icpEnabled} onCheckedChange={(icpEnabled) => setForm({ ...form, icpEnabled })} />
+      </Row>
+      <Row label={t("icpText")}>
+        <Input value={form.icpText} placeholder="京ICP备00000000号" disabled={!form.icpEnabled} onChange={(e) => setForm({ ...form, icpText: e.target.value })} />
+      </Row>
+      <p className="text-xs text-muted-foreground">{t("brandingHint")}</p>
+      <Button onClick={() => onSave(form)}>{tc("save")}</Button>
+    </Section>
   );
 }
 

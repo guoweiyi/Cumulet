@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import { toast } from "sonner";
+import type { AgreementSettings } from "@/lib/settings";
 import {
   defaultValues,
   evaluateVisibility,
@@ -19,9 +20,11 @@ import { Card, CardContent } from "@/components/ui/card";
 export function RequestForm({
   schemaId,
   definition,
+  agreement,
 }: {
   schemaId: string;
   definition: FormDefinition;
+  agreement: AgreementSettings;
 }) {
   const t = useTranslations("ticket");
   const locale = useLocale();
@@ -29,6 +32,8 @@ export function RequestForm({
   const [values, setValues] = useState<FormValues>(() => defaultValues(definition));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [agreed, setAgreed] = useState(false);
+  const [agreeError, setAgreeError] = useState(false);
 
   // Reconcile values with visibility on every change:
   //  - drop values of fields that are now hidden (also stripped server-side), and
@@ -59,15 +64,24 @@ export function RequestForm({
     const result = validateSubmission(definition, values);
     setErrors(result.errors);
     if (!result.ok) return;
+    if (agreement.enabled && !agreed) {
+      setAgreeError(true);
+      return;
+    }
+    setAgreeError(false);
     setBusy(true);
     try {
       const res = await fetch("/api/tickets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schemaId, values: result.cleaned }),
+        body: JSON.stringify({ schemaId, values: result.cleaned, agreed }),
       });
       if (res.status === 422) {
         const data = await res.json();
+        if (data.error?.code === "agreement_required") {
+          setAgreeError(true);
+          return;
+        }
         setErrors(data.error?.fields ?? {});
         return;
       }
@@ -84,6 +98,7 @@ export function RequestForm({
   }
 
   const visible = evaluateVisibility(definition, values);
+  const labelParts = agreement.labelTemplate.split("{link}");
   const summary = definition.fields
     .filter((f) => visible.has(f.id))
     .filter((f) => {
@@ -118,11 +133,54 @@ export function RequestForm({
       </Card>
 
       <div className="fixed inset-x-0 bottom-0 z-30 border-t border-border bg-card/95 backdrop-blur">
-        <div className="mx-auto flex max-w-3xl items-center gap-4 px-4 py-3">
-          <p className="flex-1 truncate text-xs text-muted-foreground">{summary.join(" · ")}</p>
-          <Button onClick={submit} disabled={busy} size="lg">
-            {t("newRequest")}
-          </Button>
+        <div className="mx-auto flex max-w-3xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
+          {agreement.enabled ? (
+            <div className="flex flex-1 items-start gap-2 text-xs text-muted-foreground">
+              <input
+                id="agree-terms"
+                type="checkbox"
+                checked={agreed}
+                onChange={(e) => {
+                  setAgreed(e.target.checked);
+                  if (e.target.checked) setAgreeError(false);
+                }}
+                className="mt-0.5 size-4 shrink-0 rounded border"
+              />
+              <span
+                className={agreeError ? "text-red-600" : ""}
+                onClick={() => setAgreed((v) => !v)}
+              >
+                {labelParts[0]}
+                {labelParts.length > 1 && (
+                  <>
+                    {agreement.linkUrl ? (
+                      <a
+                        href={agreement.linkUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="font-medium text-blue-600 underline underline-offset-2"
+                      >
+                        {agreement.linkText}
+                      </a>
+                    ) : (
+                      <span className="font-medium">{agreement.linkText}</span>
+                    )}
+                    {labelParts[1] ?? ""}
+                  </>
+                )}
+              </span>
+            </div>
+          ) : (
+            <p className="flex-1 truncate text-xs text-muted-foreground">{summary.join(" · ")}</p>
+          )}
+          {agreeError && <p className="text-xs text-red-600 sm:hidden">{t("agreementRequired")}</p>}
+          <div className="flex items-center justify-end gap-3">
+            {agreeError && <p className="hidden text-xs text-red-600 sm:block">{t("agreementRequired")}</p>}
+            <Button onClick={submit} disabled={busy || (agreement.enabled && !agreed)} size="lg">
+              {t("newRequest")}
+            </Button>
+          </div>
         </div>
       </div>
     </div>

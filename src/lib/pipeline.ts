@@ -4,6 +4,7 @@ import type {
   ResourceBinding,
   ProvisioningStepType,
   ProvisionedResource,
+  WorkflowSchema,
 } from "@prisma/client";
 import { prisma } from "./prisma";
 import { pveClient, PveClient } from "./pve";
@@ -17,6 +18,9 @@ import { emailProvisioned, emailStepFailedToAdmins } from "./emails";
 import { getHypervisorProvider, type IHypervisorProvider } from "./providers";
 import { emitResourceProvisioned, emitTicketStatusChanged } from "./webhooks";
 import { provisionExternalAccess, type ExternalAccessRequest } from "./networking";
+import { parseWorkflowDefinition, type HttpRequestConfig, type StepConfig, type WorkflowDefinition } from "./workflow-definition";
+import { fetch as ufetch } from "undici";
+import { safeDispatcher } from "./safe-url";
 
 /**
  * Step-tracked, resumable, idempotent provisioning pipeline. Synchronous
@@ -28,6 +32,7 @@ import { provisionExternalAccess, type ExternalAccessRequest } from "./networkin
 export const STEP_ORDER: ProvisioningStepType[] = [
   "VALIDATE_VMID",
   "CLOUD_INIT",
+  "DATABASE_BOOTSTRAP",
   "PVE_SECURITY_GROUP",
   "EXTERNAL_ACCESS",
   "JS_ASSET",
@@ -35,7 +40,7 @@ export const STEP_ORDER: ProvisioningStepType[] = [
   "NOTIFY",
 ];
 
-type BindingFull = ResourceBinding & { pveNode: PveNode; resource: ProvisionedResource };
+type BindingFull = ResourceBinding & { pveNode: PveNode; resource: ProvisionedResource; workflowSchema: WorkflowSchema | null };
 
 type StepContext = {
   binding: BindingFull;
@@ -44,6 +49,8 @@ type StepContext = {
   actorId: string;
   /** Decrypted only for the active run; the database stores ciphertext. */
   runState: { ciPassword?: string; assetName: string };
+  workflow: WorkflowDefinition | null;
+  variables: Record<string, unknown>;
 };
 
 function provisionMeta(binding: BindingFull): Record<string, unknown> {
@@ -52,9 +59,20 @@ function provisionMeta(binding: BindingFull): Record<string, unknown> {
     : {};
 }
 
-function shouldRunStep(binding: BindingFull, step: ProvisioningStepType): boolean {
-  const meta = provisionMeta(binding);
-  if (step === "PVE_SECURITY_GROUP") return meta.configureSecurityGroup !== false && !!binding.pveSecurityGroup;
+function stepConfig(ctx: StepContext, step: ProvisioningStepType): StepConfig | undefined {
+  return ctx.workflow?.stepConfigs[step];
+}
+
+function resolveInput<T>(ctx: StepContext, step: ProvisioningStepType, key: string, fallback: T): T {
+  const binding = stepConfig(ctx, step)?.inputBindings[key];
+  if (!binding) return fallback;
+  if (binding.startsWith("literal:")) return binding.slice(8) as T;
+  return (ctx.variables[binding] ?? fallback) as T;
+}
+
+function shouldRunStep(ctx: StepContext, step: ProvisioningStepType): boolean {
+  const meta = provisionMeta(ctx.binding);
+  if (step === "PVE_SECURITY_GROUP") return resolveInput(ctx, step, "enabled", meta.configureSecurityGroup !== false) !== false && !!ctx.binding.pveSecurityGroup;
   if (step === "EXTERNAL_ACCESS") return !!meta.externalAccess;
   return true;
 }
@@ -62,7 +80,7 @@ function shouldRunStep(binding: BindingFull, step: ProvisioningStepType): boolea
 async function loadBinding(bindingId: string): Promise<BindingFull> {
   const binding = await prisma.resourceBinding.findUnique({
     where: { id: bindingId },
-    include: { pveNode: true, resource: true },
+    include: { pveNode: true, resource: true, workflowSchema: true },
   });
   if (!binding) throw new Error("binding_not_found");
   return binding;
@@ -105,8 +123,9 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
     await provider.getStatus({ providerResourceId: binding.resource.providerResourceId });
   },
 
-  async CLOUD_INIT({ binding, provider, runState }) {
-    const password = runState.ciPassword;
+  async CLOUD_INIT(ctx) {
+    const { binding, provider, runState } = ctx;
+    const password = resolveInput(ctx, "CLOUD_INIT", "password", runState.ciPassword);
     if (!password) throw new Error("initial_password_missing");
     // ipconfig / nameserver come from admin-provided values captured at approve.
     const meta = provisionMeta(binding) as Record<string, string>;
@@ -117,11 +136,11 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
       ramGB: binding.resource.ramGB,
       diskGB: binding.resource.diskGB,
       cloudInit: {
-        username: binding.cloudInitUser,
+        username: resolveInput(ctx, "CLOUD_INIT", "username", binding.cloudInitUser),
         password,
-        sshKeys: meta.sshKeys,
-        ipConfig: meta.ipconfig,
-        nameserver: meta.nameserver,
+        sshKeys: resolveInput(ctx, "CLOUD_INIT", "sshKeys", meta.sshKeys),
+        ipConfig: resolveInput(ctx, "CLOUD_INIT", "ipConfig", meta.ipconfig),
+        nameserver: resolveInput(ctx, "CLOUD_INIT", "nameserver", meta.nameserver),
       },
     });
     await prisma.resourceBinding.update({
@@ -130,8 +149,39 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
     });
   },
 
-  async PVE_SECURITY_GROUP({ binding, pve, actorId }) {
-    const groupName = binding.pveSecurityGroup;
+  async DATABASE_BOOTSTRAP(ctx) {
+    const engine = String(resolveInput(ctx, "DATABASE_BOOTSTRAP", "engine", ""));
+    const databaseName = String(resolveInput(ctx, "DATABASE_BOOTSTRAP", "databaseName", ""));
+    const adminUser = String(resolveInput(ctx, "DATABASE_BOOTSTRAP", "adminUser", ""));
+    const adminPassword = String(resolveInput(ctx, "DATABASE_BOOTSTRAP", "adminPassword", ""));
+    const port = Number(resolveInput(ctx, "DATABASE_BOOTSTRAP", "port", 0));
+    if (!["postgresql", "mysql", "redis", "mongodb"].includes(engine)) throw new Error("unsupported_database_engine");
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(databaseName)) throw new Error("invalid_database_name");
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(adminUser)) throw new Error("invalid_database_admin_user");
+    if (adminPassword.length < 8 || adminPassword.length > 200) throw new Error("invalid_database_admin_password");
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("invalid_database_port");
+    const sqlString = (value: string) => value.replaceAll("'", "''");
+    const mysqlString = (value: string) => value.replaceAll("\\", "\\\\").replaceAll("'", "''");
+    const pgIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    const mysqlIdentifier = (value: string) => `\`${value.replaceAll("`", "``")}\``;
+    const shellArg = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+    let script: string;
+    if (engine === "postgresql") {
+      script = `set -eu\ncommand -v psql >/dev/null\nsudo -n -u postgres psql -v ON_ERROR_STOP=1 <<'CUMULET_SQL'\nDO $cumulet$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${sqlString(adminUser)}') THEN CREATE ROLE ${pgIdentifier(adminUser)} LOGIN PASSWORD '${sqlString(adminPassword)}'; ELSE ALTER ROLE ${pgIdentifier(adminUser)} PASSWORD '${sqlString(adminPassword)}'; END IF; END $cumulet$;\nSELECT 'CREATE DATABASE ${pgIdentifier(databaseName)} OWNER ${pgIdentifier(adminUser)}' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${sqlString(databaseName)}')\\gexec\nCUMULET_SQL\n`;
+    } else if (engine === "mysql") {
+      script = `set -eu\ncommand -v mysql >/dev/null\nmysql --protocol=socket -uroot <<'CUMULET_SQL'\nCREATE DATABASE IF NOT EXISTS ${mysqlIdentifier(databaseName)};\nCREATE USER IF NOT EXISTS '${mysqlString(adminUser)}'@'%' IDENTIFIED BY '${mysqlString(adminPassword)}';\nALTER USER '${mysqlString(adminUser)}'@'%' IDENTIFIED BY '${mysqlString(adminPassword)}';\nGRANT ALL PRIVILEGES ON ${mysqlIdentifier(databaseName)}.* TO '${mysqlString(adminUser)}'@'%';\nFLUSH PRIVILEGES;\nCUMULET_SQL\n`;
+    } else if (engine === "redis") {
+      script = `set -eu\ncommand -v redis-cli >/dev/null\nredis-cli -p ${port} CONFIG SET requirepass ${shellArg(adminPassword)} >/dev/null\n`;
+    } else {
+      const jsString = (value: string) => JSON.stringify(value);
+      script = `set -eu\ncommand -v mongosh >/dev/null\nmongosh --quiet --port ${port} --eval ${shellArg(`db.getSiblingDB(${jsString(databaseName)}).updateUser(${jsString(adminUser)}, {pwd:${jsString(adminPassword)},roles:[{role:"dbOwner",db:${jsString(databaseName)}}]})`)} || mongosh --quiet --port ${port} --eval ${shellArg(`db.getSiblingDB(${jsString(databaseName)}).createUser({user:${jsString(adminUser)},pwd:${jsString(adminPassword)},roles:[{role:"dbOwner",db:${jsString(databaseName)}}]})`)}\n`;
+    }
+    await runGuestScript(ctx.pve, ctx.binding.vmid, script);
+  },
+
+  async PVE_SECURITY_GROUP(ctx) {
+    const { binding, pve, actorId } = ctx;
+    const groupName = resolveInput(ctx, "PVE_SECURITY_GROUP", "groupName", binding.pveSecurityGroup);
     if (!groupName) throw new Error("no_security_group_selected");
 
     // Ensure group exists on this node (idempotent).
@@ -204,10 +254,11 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
     );
   },
 
-  async JS_ASSET({ binding, runState }) {
+  async JS_ASSET(ctx) {
+    const { binding, runState } = ctx;
     const js = await jumpServerClient(binding.boundById);
     const settings = await getSetting("jumpserver");
-    const name = runState.assetName;
+    const name = resolveInput(ctx, "JS_ASSET", "name", runState.assetName);
     const ticket = await prisma.ticket.findUnique({
       where: { id: binding.ticketId },
       include: { user: true },
@@ -228,11 +279,26 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
         name,
         address: binding.internalIp,
         nodeId: userNode.id,
-        accountTemplate: settings?.defaultAccountUsername ? undefined : undefined,
+        // Legacy fallback: when no initial password is stored, attach the
+        // configured default account template so the asset still has an account.
+        accountTemplate: runState.ciPassword ? undefined : settings?.defaultAccountUsername,
       });
       assetId = host.id;
     } else {
       await js.setHostNode(assetId, userNode.id);
+    }
+
+    // Sync a managed account with the initially generated credentials so the
+    // asset can be connected to with the same user/password given to the
+    // requester. Idempotent: find -> create or update secret.
+    const accountUsername = (binding.cloudInitUser || "").trim();
+    if (accountUsername && runState.ciPassword) {
+      const existingAccount = await js.findAccount(assetId, accountUsername);
+      if (existingAccount) {
+        await js.updateAccountSecret(existingAccount.id, runState.ciPassword);
+      } else {
+        await js.createAccount({ assetId, username: accountUsername, secret: runState.ciPassword });
+      }
     }
     await prisma.resourceBinding.update({
       where: { id: binding.id },
@@ -240,7 +306,8 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
     });
   },
 
-  async JS_PERMISSION({ binding }) {
+  async JS_PERMISSION(ctx) {
+    const { binding, runState } = ctx;
     const js = await jumpServerClient(binding.boundById);
     const settings = await getSetting("jumpserver");
     const ticket = await prisma.ticket.findUnique({
@@ -269,11 +336,19 @@ const STEP_IMPL: Record<ProvisioningStepType, (ctx: StepContext) => Promise<void
 
     let permId = binding.jsPermissionId;
     if (!permId) {
+      // The managed account is synced under the cloud-init user whenever an
+      // initial password exists; grant on that account (admins may override it
+      // through the workflow input). Otherwise keep the legacy default.
+      const syncedUsername =
+        runState.ciPassword && (binding.cloudInitUser || "").trim() ? binding.cloudInitUser.trim() : "";
+      const accountUsername = syncedUsername
+        ? String(resolveInput(ctx, "JS_PERMISSION", "accountUsername", syncedUsername))
+        : (settings?.defaultAccountUsername ?? "@ALL");
       const perm = await js.createAssetPermission({
         name: `cumulet-${binding.vmid}-${ticket.user.email}`,
         userId: jsUser.id,
         assetId: binding.jsAssetId,
-        accountUsername: settings?.defaultAccountUsername ?? "@ALL",
+        accountUsername,
       });
       permId = perm.id;
     }
@@ -337,8 +412,20 @@ async function runStep(
 ): Promise<boolean> {
   await markStep(ctx.binding.id, step, "RUNNING");
   try {
-    await STEP_IMPL[step](ctx);
+    const config = stepConfig(ctx, step);
+    const outputs: Record<string, unknown> = {};
+    await runWithTimeout((async () => {
+      await executeHttpRequests(ctx, config, "BEFORE", outputs);
+      if (config?.runBuiltIn !== false && shouldRunStep(ctx, step)) await STEP_IMPL[step](ctx);
+      await executeHttpRequests(ctx, config, "AFTER", outputs);
+    })(), config?.timeoutSeconds);
     await markStep(ctx.binding.id, step, "SUCCESS");
+    if (Object.keys(outputs).length) {
+      await prisma.provisioningStep.update({
+        where: { bindingId_step: { bindingId: ctx.binding.id, step } },
+        data: { outputEnc: encryptSecret(JSON.stringify(outputs)) },
+      });
+    }
     await audit({
       actorId: ctx.actorId,
       action: `pipeline.step.success`,
@@ -349,29 +436,175 @@ async function runStep(
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : "step failed";
-    await markStep(ctx.binding.id, step, "FAILED", message);
+    const skip = stepConfig(ctx, step)?.failurePolicy === "SKIP";
+    await markStep(ctx.binding.id, step, skip ? "SKIPPED" : "FAILED", message);
     await audit({
       actorId: ctx.actorId,
-      action: `pipeline.step.failed`,
+      action: skip ? "pipeline.step.auto_skipped" : "pipeline.step.failed",
       targetType: "ResourceBinding",
       targetId: ctx.binding.id,
       metadata: { step, error: message },
     });
-    const ticket = await prisma.ticket.findUnique({ where: { id: ctx.binding.ticketId } });
-    if (ticket) void emailStepFailedToAdmins(ticket.id, step, message);
-    return false;
+    if (!skip) {
+      const ticket = await prisma.ticket.findUnique({ where: { id: ctx.binding.ticketId } });
+      if (ticket) void emailStepFailedToAdmins(ticket.id, step, message);
+    }
+    return skip;
   }
 }
 
+function renderRequestTemplate(template: string, variables: Record<string, unknown>): string {
+  return template.replace(/\{\{(?:(json|url):)?([a-z][a-zA-Z0-9_.-]*)\}\}/g, (_match, mode: string | undefined, key: string) => {
+    if (!(key in variables)) throw new Error(`request_variable_missing_${key}`);
+    const value = variables[key];
+    if (mode === "json") return JSON.stringify(value);
+    if (mode === "url") return encodeURIComponent(String(value ?? ""));
+    return typeof value === "object" ? JSON.stringify(value) : String(value ?? "");
+  });
+}
+
+function expectedStatus(status: number, expression: string): boolean {
+  return expression.split(",").some((part) => {
+    const [start, end] = part.trim().split("-").map(Number);
+    return status >= start && status <= (end || start);
+  });
+}
+
+async function executeHttpRequests(ctx: StepContext, config: StepConfig | undefined, timing: "BEFORE" | "AFTER", outputs: Record<string, unknown>): Promise<void> {
+  for (const request of config?.requests.filter((item) => item.timing === timing) ?? []) {
+    await executeHttpRequest(ctx, request, outputs);
+  }
+}
+
+async function executeHttpRequest(ctx: StepContext, request: HttpRequestConfig, outputs: Record<string, unknown>): Promise<void> {
+  let dispatcher: Awaited<ReturnType<typeof safeDispatcher>>["dispatcher"] | undefined;
+  try {
+    const url = renderRequestTemplate(request.urlTemplate, ctx.variables);
+    const resolved = await safeDispatcher(url);
+    dispatcher = resolved.dispatcher;
+    const forbiddenHeaders = new Set(["host", "content-length", "connection", "transfer-encoding"]);
+    const headers = Object.fromEntries(request.headers.map((header) => {
+      if (forbiddenHeaders.has(header.name.toLowerCase())) throw new Error("forbidden_request_header");
+      return [header.name, renderRequestTemplate(header.valueTemplate, ctx.variables)];
+    }));
+    const body = request.method === "GET" || request.bodyTemplate === undefined
+      ? undefined
+      : renderRequestTemplate(request.bodyTemplate, ctx.variables);
+    if (body && !Object.keys(headers).some((name) => name.toLowerCase() === "content-type")) headers["Content-Type"] = "application/json";
+    const response = await ufetch(resolved.url, { method: request.method, headers, body, dispatcher, signal: AbortSignal.timeout(60_000) });
+    if (!expectedStatus(response.status, request.expectedStatuses)) throw new Error(`http_request_${request.id}_status_${response.status}`);
+    const text = await response.text();
+    if (Buffer.byteLength(text) > 1024 * 1024) throw new Error(`http_request_${request.id}_response_too_large`);
+    if (request.captureVariable) {
+      let value: unknown = text;
+      try { value = text ? JSON.parse(text) : null; } catch { /* keep text response */ }
+      outputs[request.captureVariable] = value;
+      ctx.variables[`output.${request.captureVariable}`] = value;
+    }
+  } catch (error) {
+    if (error instanceof Error && (error.message.startsWith("http_request_") || error.message.startsWith("request_variable_") || error.message === "forbidden_request_header")) throw error;
+    throw new Error(`http_request_${request.id}_failed`);
+  } finally {
+    if (dispatcher) await dispatcher.close();
+  }
+}
+
+async function runWithTimeout(execution: Promise<void>, timeoutSeconds?: number): Promise<void> {
+  if (!timeoutSeconds) return execution;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      execution,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`step_timeout_${timeoutSeconds}s`)), timeoutSeconds * 1000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function runGuestScript(pve: PveClient, vmid: number, script: string): Promise<void> {
+  const agentDeadline = Date.now() + 180_000;
+  let pid: number | undefined;
+  while (!pid && Date.now() < agentDeadline) {
+    try {
+      pid = await pve.guestExec(vmid, ["/bin/sh"], Buffer.from(script, "utf8"));
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+  if (!pid) throw new Error("database_guest_agent_unavailable");
+  const deadline = Date.now() + 600_000;
+  while (Date.now() < deadline) {
+    const status = await pve.guestExecStatus(vmid, pid);
+    if (status.exited === 1 || status.exited === true) {
+      // Guest output may echo SQL containing credentials, so never persist it.
+      if (status.exitcode !== 0) throw new Error(`database_bootstrap_failed_exit_${status.exitcode}`);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error("database_bootstrap_timeout");
+}
+
 async function makeContext(binding: BindingFull, actorId: string): Promise<StepContext> {
+  const meta = provisionMeta(binding);
+  const storedInputs = meta.workflowInputs && typeof meta.workflowInputs === "object" && !Array.isArray(meta.workflowInputs)
+    ? meta.workflowInputs as Record<string, unknown>
+    : {};
+  const approvalVariables = Object.fromEntries(Object.entries(storedInputs).map(([key, value]) => {
+    if (value && typeof value === "object" && !Array.isArray(value) && "encrypted" in value) {
+      return [`approval.${key}`, decryptSecret(String((value as { encrypted: unknown }).encrypted))];
+    }
+    return [`approval.${key}`, value];
+  }));
+  const workflow = binding.workflowSchema ? parseWorkflowDefinition(binding.workflowSchema.definition) : null;
+  const password = binding.initialPasswordEnc ? decryptSecret(binding.initialPasswordEnc) : undefined;
+  const ticket = await prisma.ticket.findUnique({ where: { id: binding.ticketId }, select: { values: true, user: { select: { email: true } } } });
+  const storedOutputs = await prisma.provisioningStep.findMany({ where: { bindingId: binding.id, outputEnc: { not: null } }, select: { outputEnc: true } });
+  const outputVariables: Record<string, unknown> = {};
+  for (const row of storedOutputs) {
+    try {
+      const values = JSON.parse(decryptSecret(row.outputEnc!)) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(values)) outputVariables[`output.${key}`] = value;
+    } catch { /* a corrupt historical output must not block retrying the workflow */ }
+  }
+  const storedRequestValues = meta.requestValues && typeof meta.requestValues === "object" && !Array.isArray(meta.requestValues)
+    ? meta.requestValues as Record<string, unknown>
+    : {};
+  const requestValues = {
+    ...(ticket?.values && typeof ticket.values === "object" && !Array.isArray(ticket.values)
+      ? ticket.values as Record<string, unknown>
+      : {}),
+    ...storedRequestValues,
+  };
   return {
     binding,
     pve: pveClient(binding.pveNode, actorId),
     provider: await getHypervisorProvider(binding.resource.providerId, actorId),
     actorId,
+    workflow,
+    variables: {
+      ...approvalVariables,
+      ...outputVariables,
+      ...Object.fromEntries(Object.entries(requestValues).map(([key, value]) => [`request.${key}`, value])),
+      "system.vmid": String(binding.vmid),
+      "system.internalIp": binding.internalIp,
+      "system.ciUser": binding.cloudInitUser,
+      "system.initialPassword": password,
+      "system.sshKeys": meta.sshKeys,
+      "system.ipconfig": meta.ipconfig,
+      "system.nameserver": meta.nameserver,
+      "system.configureSecurityGroup": meta.configureSecurityGroup,
+      "system.securityGroup": binding.pveSecurityGroup,
+      "system.externalAccess": meta.externalAccess,
+      "system.resourceName": binding.resource.displayName,
+      "system.ownerEmail": ticket?.user.email,
+    },
     runState: {
       assetName: binding.resource.displayName,
-      ciPassword: binding.initialPasswordEnc ? decryptSecret(binding.initialPasswordEnc) : undefined,
+      ciPassword: password,
     },
   };
 }
@@ -432,7 +665,7 @@ async function continuePipeline(
       where: { bindingId_step: { bindingId: ctx.binding.id, step } },
     });
     if (existing?.status === "SUCCESS" || existing?.status === "SKIPPED") continue;
-    if (!shouldRunStep(ctx.binding, step)) {
+    if (!shouldRunStep(ctx, step) && !(stepConfig(ctx, step)?.requests.length)) {
       await markStep(ctx.binding.id, step, "SKIPPED");
       continue;
     }

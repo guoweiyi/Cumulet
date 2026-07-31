@@ -1,10 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { Copy, ExternalLink, Eye, EyeOff, HardDrive, Loader2, Monitor, Power, PowerOff, RotateCw, Square } from "lucide-react";
+import { Clock, Copy, ExternalLink, Eye, EyeOff, HardDrive, Loader2, MapPin, Monitor, Network, Power, PowerOff, RotateCw, Server, Square, UserRound } from "lucide-react";
 import type { DetailModule } from "@/lib/workflow-definition";
+import { localized, type I18nText } from "@/i18n/config";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -84,10 +85,16 @@ export function VmPanel({ binding, jsPortalUrl, detailModules }: { binding: VmBi
   const stateKey = data?.status.state === "running" || data?.status.state === "stopped" || data?.status.state === "paused" ? data.status.state : "unknown";
   const moduleSet = new Set(detailModules);
 
+  // Layout slots: monitoring/logs/AI live in the main column, connection and
+  // configuration in the sidebar, summary renders as stat tiles on top.
+  const mainModules = (["monitoring", "logs", "ai"] as DetailModule[]).filter((m) => moduleSet.has(m));
+  const sideModules = (["connection", "configuration"] as DetailModule[]).filter((m) => moduleSet.has(m));
+  const fallbackModules = detailModules.filter((m) => !["summary", "connection", "configuration", "monitoring", "logs", "ai", "console"].includes(m));
+
   function renderModule(module: DetailModule) {
     switch (module) {
       case "summary":
-        return <Card key={module}><CardHeader><CardTitle className="text-sm text-neutral-500">{t("serverInfo")}</CardTitle></CardHeader><CardContent><dl className="grid gap-x-6 gap-y-2.5 text-sm sm:grid-cols-2"><InfoRow label={t("serverName")} value={data?.status.name || `VM ${binding.vmid}`} /><InfoRow label={t("az")} value={binding.nodeName} /><InfoRow label={t("internalIp")} value={binding.internalIp} copyable /><InfoRow label={t("osUser")} value={binding.ciUser} copyable /><InfoRow label={t("uptime")} value={data && running ? formatUptime(data.status.uptime) : "-"} /><InfoRow label="VMID" value={String(binding.vmid)} /></dl></CardContent></Card>;
+        return null;
       case "connection":
         return <Card key={module}><CardHeader><CardTitle className="text-sm text-neutral-500">{t("remoteConnection")}</CardTitle></CardHeader><CardContent className="space-y-3"><div className="rounded-md border bg-neutral-50/60 p-3"><p className="mb-1 text-sm font-medium">{t("jumpserverCard")}</p><p className="mb-3 text-xs text-neutral-500">{t("jumpserverHint")}</p>{jsPortalUrl && <Button asChild size="sm" variant="outline"><a href={jsPortalUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" />{t("openPortal")}</a></Button>}<div className="mt-3 flex flex-wrap items-center gap-2 text-xs"><span className="text-neutral-500">{t("jumpserverAsset")}:</span><code className="rounded bg-white px-1.5 py-0.5">{binding.jsAssetName}</code><CopyBtn text={binding.jsAssetName} /></div><div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="text-neutral-500">{t("jumpserverAssetPath")}:</span><code className="break-all rounded bg-white px-1.5 py-0.5">{binding.jsAssetPath}</code><CopyBtn text={binding.jsAssetPath} /></div></div><InitialCredentials bindingId={binding.id} username={binding.ciUser} /></CardContent></Card>;
       case "configuration":
@@ -103,15 +110,74 @@ export function VmPanel({ binding, jsPortalUrl, detailModules }: { binding: VmBi
     }
   }
 
-  return <div className="mx-auto max-w-6xl space-y-4">
-    <div className="flex flex-wrap items-center gap-2"><h1 className="mr-2 text-lg font-semibold">{data?.status.name || `VM ${binding.vmid}`}</h1><Badge variant="secondary" className={running ? "bg-emerald-50 text-emerald-700" : unreachable ? "bg-neutral-100 text-neutral-500" : "bg-red-50 text-red-600"}>{unreachable ? tc("connectionFailed") : data ? t(`state.${stateKey}`) : tc("loading")}</Badge><div className="flex-1" />{moduleSet.has("console") && <Button size="sm" variant="outline" onClick={() => window.open(`/servers/${binding.id}/console`, "_blank", "width=1080,height=760")}><Monitor className="size-4" />{t("console")}</Button>}<Button size="sm" className="bg-emerald-600 hover:bg-emerald-700" disabled={powerBusy || running} onClick={() => power("start")}><Power className="size-4" />{t("start")}</Button><Button size="sm" className="bg-cyan-600 hover:bg-cyan-700" disabled={powerBusy || !running} onClick={() => power("reboot")}><RotateCw className="size-4" />{t("reboot")}</Button><Button size="sm" className="bg-red-600 hover:bg-red-700" disabled={powerBusy || !running} onClick={() => power("shutdown")}><PowerOff className="size-4" />{t("shutdown")}</Button><Button size="sm" variant="outline" className="border-red-200 text-red-600 hover:bg-red-50" disabled={powerBusy || !running} onClick={() => power("stop")}><Square className="size-4" />{t("forceStop")}</Button></div>
-    <div className="grid gap-4 lg:grid-cols-2">{detailModules.map(renderModule)}</div>
-  </div>;
+  return (
+    <div className="mx-auto max-w-7xl space-y-5">
+      {/* Header hero: name, state, identity and power actions */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+        <div className="flex items-center gap-3">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand">
+            <Server className="size-5" strokeWidth={2} />
+          </div>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-lg font-semibold tracking-tight">{data?.status.name || `VM ${binding.vmid}`}</h1>
+              <Badge variant="secondary" className={running ? "bg-emerald-50 text-emerald-700" : unreachable ? "bg-neutral-100 text-neutral-500" : "bg-red-50 text-red-600"}>
+                {unreachable ? tc("connectionFailed") : data ? t(`state.${stateKey}`) : tc("loading")}
+              </Badge>
+            </div>
+            <p className="mt-0.5 text-sm text-muted-foreground">{binding.internalIp} · {binding.nodeName}</p>
+          </div>
+        </div>
+        <div className="flex-1" />
+        <div className="flex flex-wrap items-center gap-2">
+          {moduleSet.has("console") && <Button size="sm" variant="outline" onClick={() => window.open(`/servers/${binding.id}/console`, "_blank", "width=1080,height=760")}><Monitor className="size-4" />{t("console")}</Button>}
+          <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700" disabled={powerBusy || running} onClick={() => power("start")}><Power className="size-4" />{t("start")}</Button>
+          <Button size="sm" className="bg-cyan-600 hover:bg-cyan-700" disabled={powerBusy || !running} onClick={() => power("reboot")}><RotateCw className="size-4" />{t("reboot")}</Button>
+          <Button size="sm" className="bg-red-600 hover:bg-red-700" disabled={powerBusy || !running} onClick={() => power("shutdown")}><PowerOff className="size-4" />{t("shutdown")}</Button>
+          <Button size="sm" variant="outline" className="border-red-200 text-red-600 hover:bg-red-50" disabled={powerBusy || !running} onClick={() => power("stop")}><Square className="size-4" />{t("forceStop")}</Button>
+        </div>
+      </div>
+
+      {/* Key facts as stat tiles */}
+      {moduleSet.has("summary") && (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <StatTile icon={<Server className="size-4" />} label="VMID" value={String(binding.vmid)} />
+          <StatTile icon={<Network className="size-4" />} label={t("internalIp")} value={binding.internalIp} copyable />
+          <StatTile icon={<UserRound className="size-4" />} label={t("osUser")} value={binding.ciUser} copyable />
+          <StatTile icon={<MapPin className="size-4" />} label={t("az")} value={binding.nodeName} />
+          <StatTile icon={<Clock className="size-4" />} label={t("uptime")} value={data && running ? formatUptime(data.status.uptime) : "-"} />
+        </div>
+      )}
+
+      {(mainModules.length > 0 || sideModules.length > 0 || fallbackModules.length > 0) && (
+        <div className="grid gap-4 lg:grid-cols-3">
+          <div className="space-y-4 lg:col-span-2">
+            {[...mainModules, ...fallbackModules].map(renderModule)}
+          </div>
+          {sideModules.length > 0 && <div className="space-y-4">{sideModules.map(renderModule)}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatTile({ icon, label, value, copyable }: { icon: React.ReactNode; label: string; value: string; copyable?: boolean }) {
+  return (
+    <div className="rounded-xl border bg-card p-3.5 shadow-sm">
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">{icon}{label}</div>
+      <div className="mt-1 flex items-center gap-1.5 font-medium">
+        <span className="truncate">{value}</span>
+        {copyable && <CopyBtn text={value} />}
+      </div>
+    </div>
+  );
 }
 
 function InitialCredentials({ bindingId, username }: { bindingId: string; username: string }) {
   const t = useTranslations("vm");
+  const locale = useLocale();
   const [password, setPassword] = useState<string | null>(null);
+  const [workflowCredentials, setWorkflowCredentials] = useState<{ key: string; label: I18nText; sensitive: boolean; value: unknown }[]>([]);
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -124,11 +190,12 @@ function InitialCredentials({ bindingId, username }: { bindingId: string; userna
       if (!response.ok) return toast.error(t("credentialsUnavailable"));
       const data = await response.json();
       setPassword(data.password);
+      setWorkflowCredentials(data.workflowCredentials ?? []);
     }
     setVisible(true);
   }
 
-  return <div className="rounded-md border p-3"><p className="mb-2 text-sm font-medium">{t("initialCredentials")}</p><div className="grid gap-2 text-sm"><InfoRow label={t("osUser")} value={username} copyable /><div className="flex items-center justify-between gap-2"><span className="text-neutral-500">{t("initialPassword")}</span><span className="flex min-w-0 items-center gap-1.5 font-mono"><span className="max-w-56 truncate">{visible && password ? password : "********"}</span>{visible && password && <CopyBtn text={password} />}<Button type="button" size="icon" variant="ghost" className="size-7" disabled={busy} onClick={toggle} title={visible ? t("hidePassword") : t("showPassword")}>{busy ? <Loader2 className="size-4 animate-spin" /> : visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button></span></div></div><p className="mt-2 text-xs text-neutral-500">{t("initialCredentialsHint")}</p></div>;
+  return <div className="rounded-md border p-3"><p className="mb-2 text-sm font-medium">{t("initialCredentials")}</p><div className="grid gap-2 text-sm"><InfoRow label={t("osUser")} value={username} copyable /><div className="flex items-center justify-between gap-2"><span className="text-neutral-500">{t("initialPassword")}</span><span className="flex min-w-0 items-center gap-1.5 font-mono"><span className="max-w-56 truncate">{visible && password ? password : "********"}</span>{visible && password && <CopyBtn text={password} />}<Button type="button" size="icon" variant="ghost" className="size-7" disabled={busy} onClick={toggle} title={visible ? t("hidePassword") : t("showPassword")}>{busy ? <Loader2 className="size-4 animate-spin" /> : visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}</Button></span></div>{visible && workflowCredentials.map((credential) => <InfoRow key={credential.key} label={localized(credential.label, locale)} value={String(credential.value)} copyable />)}</div><p className="mt-2 text-xs text-neutral-500">{t("initialCredentialsHint")}</p></div>;
 }
 
 function InfoRow({ label, value, copyable }: { label: string; value: string; copyable?: boolean }) { return <div className="flex items-center justify-between gap-2 border-b border-dashed pb-1.5"><dt className="text-neutral-500">{label}</dt><dd className="flex min-w-0 items-center gap-1.5 font-medium"><span className="truncate">{value}</span>{copyable && <CopyBtn text={value} />}</dd></div>; }

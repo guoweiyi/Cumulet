@@ -16,7 +16,7 @@ import { addressInCidr, ticketRequestsExternalAccess } from "@/lib/networking";
 import { buildResourceName } from "@/lib/resource-naming";
 import { encryptSecret } from "@/lib/crypto";
 import { assignedWorkflow } from "@/lib/workflow-service";
-import { parseWorkflowDefinition } from "@/lib/workflow-definition";
+import { parseWorkflowDefinition, validateApprovalInputs } from "@/lib/workflow-definition";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -47,9 +47,16 @@ const approveSchema = z.object({
   nameserver: z.string().max(64).optional().default(""),
   ipconfig: z.string().max(128).optional().default(""),
   configureSecurityGroup: z.boolean().default(true),
-  securityGroup: z.string().min(1).max(64).optional(),
+  // "" is sent by the approval form when security-group setup is turned off.
+  securityGroup: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().min(1).max(64).optional(),
+  ),
   leaseDurationDays: z.number().int().min(1).max(3650).optional().default(30),
   externalAccess: externalAccessSchema.optional(),
+  workflowInputs: z.record(z.string(), z.unknown()).optional().default({}),
+  /** Admin-adjusted copy of the requester's submitted form values. */
+  valuesOverride: z.record(z.string(), z.unknown()).optional().default({}),
 });
 
 /**
@@ -62,7 +69,12 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
 
   const ticket = await prisma.ticket.findUnique({
     where: { id },
-    include: { user: true, binding: true, sourceInspection: { select: { id: true } } },
+    include: {
+      user: true,
+      binding: true,
+      sourceInspection: { select: { id: true } },
+      formSchema: { select: { definition: true } },
+    },
   });
   if (!ticket) throw notFound();
   if (ticket.sourceInspection) throw badRequest("system_alert_workflow");
@@ -73,6 +85,22 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   if (!parsed.success) throw badRequest("invalid_approve");
   const data = parsed.data;
   if (data.configureSecurityGroup && !data.securityGroup) throw badRequest("security_group_required");
+
+  const values = ticket.values && typeof ticket.values === "object" && !Array.isArray(ticket.values)
+    ? (ticket.values as Record<string, unknown>)
+    : {};
+  // Admin may adjust the submitted parameters at approval time. Only fields
+  // defined by the form are accepted; the original ticket submission is kept
+  // unchanged and the effective copy is stored on the binding for the pipeline.
+  const formFieldIds = new Set(
+    ((ticket.formSchema.definition as { fields?: { id: string }[] } | null)?.fields ?? []).map((field) => field.id),
+  );
+  const effectiveValues: Record<string, unknown> = { ...values };
+  for (const [key, value] of Object.entries(data.valuesOverride)) {
+    if (formFieldIds.has(key)) effectiveValues[key] = value;
+  }
+  const hasOverrides = Object.keys(data.valuesOverride).length > 0;
+
   const node = await prisma.pveNode.findUnique({ where: { id: data.pveNodeId } });
   if (!node) throw badRequest("node_not_found");
   if (!node.verified) throw new ApiError(409, "node_not_verified");
@@ -127,7 +155,7 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
     if (error instanceof ProviderError) throw new ApiError(502, error.code, error.message);
     throw error;
   }
-  const requested = requestedCapacity(ticket.values, {
+  const requested = requestedCapacity(effectiveValues, {
     cpuCores: observed.cpuCores,
     ramGB: observed.ramGB,
     diskGB: observed.diskGB,
@@ -143,9 +171,6 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   const expiresAt = new Date(
     leaseStartTime.getTime() + data.leaseDurationDays * 24 * 60 * 60 * 1000,
   );
-  const values = ticket.values && typeof ticket.values === "object" && !Array.isArray(ticket.values)
-    ? (ticket.values as Record<string, unknown>)
-    : {};
   const resourceType = typeof values.resource_type === "string" && values.resource_type.trim()
     ? values.resource_type.trim().toLowerCase()
     : "vm";
@@ -154,14 +179,24 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
     ? parseWorkflowDefinition(assignment.workflowSchema.definition)
     : null;
   if (!assignment || !workflowDefinition) throw badRequest("workflow_not_assigned");
+  const workflowInputResult = validateApprovalInputs(workflowDefinition, data.workflowInputs);
+  if (!workflowInputResult.ok) throw badRequest("invalid_workflow_inputs");
+  const workflowInputs = Object.fromEntries(
+    Object.entries(workflowInputResult.values).map(([key, value]) => {
+      const field = workflowDefinition.approvalFields.find((candidate) => candidate.key === key);
+      return field?.sensitive
+        ? [key, { encrypted: encryptSecret(String(value)) }]
+        : [key, value];
+    }),
+  );
   if (
     workflowDefinition.steps.includes("EXTERNAL_ACCESS") &&
-    ticketRequestsExternalAccess(ticket.values) &&
+    ticketRequestsExternalAccess(effectiveValues) &&
     !data.externalAccess
   ) {
     throw badRequest("external_access_config_required");
   }
-  const requestedName = typeof values.resource_name === "string" ? values.resource_name : `vm-${data.vmid}`;
+  const requestedName = typeof effectiveValues.resource_name === "string" ? effectiveValues.resource_name : `vm-${data.vmid}`;
   const displayName = buildResourceName(ticket.user, requestedName, data.vmid);
 
   const binding = await prisma.$transaction(async (tx) => {
@@ -204,6 +239,8 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
           nameserver: data.nameserver,
           sshKeys: data.sshKeys,
           configureSecurityGroup: data.configureSecurityGroup,
+          workflowInputs,
+          requestValues: effectiveValues,
           ...(data.externalAccess ? { externalAccess: data.externalAccess } : {}),
         } as Prisma.InputJsonValue,
       },
@@ -225,7 +262,17 @@ export const POST = api<Ctx>(async (req: NextRequest, ctx) => {
   });
 
   await addSystemMessage(id, "approved");
-  await audit({ actorId: user.id, action: "ticket.approve", targetType: "Ticket", targetId: id, metadata: { vmid: data.vmid, node: node.name } });
+  await audit({
+    actorId: user.id,
+    action: "ticket.approve",
+    targetType: "Ticket",
+    targetId: id,
+    metadata: {
+      vmid: data.vmid,
+      node: node.name,
+      ...(hasOverrides ? { overrides: data.valuesOverride } : {}),
+    },
+  });
   void emailTicketStatus(ticket.user.id, ticket.user.email, id, "approved");
   await emitTicketStatusChanged({
     ticketId: id,

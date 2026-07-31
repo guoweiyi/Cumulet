@@ -50,6 +50,23 @@ function bootDisk(config: Record<string, string | number>): { key: string; sizeG
   return null;
 }
 
+/**
+ * PVE validates the VM `name` as a DNS hostname and rejects underscores,
+ * uppercase letters and other characters. The platform's display name uses
+ * `owner_resource` form, so derive a DNS-safe VM name for PVE only; the
+ * operator-facing display name is left untouched.
+ */
+function pveVmName(displayName: string, vmid: number): string {
+  const cleaned = displayName
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63);
+  return cleaned || `vm-${vmid}`;
+}
+
 export class ProxmoxProvider implements IHypervisorProvider {
   readonly type = "PROXMOX" as const;
 
@@ -77,7 +94,7 @@ export class ProxmoxProvider implements IHypervisorProvider {
     try {
       await this.client.vmStatus(vmid);
       const resizeTask = await this.resize(input);
-      await this.client.setConfig(vmid, { name: input.displayName });
+      await this.client.setConfig(vmid, { name: pveVmName(input.displayName, vmid) });
       const cloudInit = input.cloudInit;
       if (cloudInit) {
         await this.client.setConfig(vmid, {

@@ -1,4 +1,21 @@
 import { tooMany } from "./api";
+import { isIP } from "node:net";
+
+/**
+ * Header stamped by server.js with the TCP peer address. server.js always
+ * overwrites the value before Next sees it, so client-supplied XFF can never
+ * spoof it (direct deployments otherwise let attackers rotate rate-limit
+ * buckets by sending arbitrary X-Forwarded-For headers).
+ */
+export const REAL_IP_HEADER = "x-cumulet-real-ip";
+
+function normalizeIp(raw: string): string | null {
+  let value = raw.trim();
+  if (!value) return null;
+  // Normalize IPv4-mapped IPv6 (::ffff:127.0.0.1) to plain IPv4.
+  if (value.startsWith("::ffff:")) value = value.slice("::ffff:".length);
+  return isIP(value) ? value : null;
+}
 
 /**
  * In-process sliding-window rate limiter (monolith deployment; no Redis by
@@ -40,7 +57,23 @@ export const LIMITS = {
   aiInspection: { max: 3, windowMs: 60 * 60_000 }, // per user / model cost guard
 } as const;
 
+/** Prefer the server-stamped peer address; fall back to XFF only when the
+ * trusted header is absent (e.g. non-custom-server deployments). */
+export function clientIpFromHeaders(reqHeaders: Headers): string {
+  const trusted = reqHeaders.get(REAL_IP_HEADER);
+  if (trusted) {
+    const ip = normalizeIp(trusted);
+    if (ip) return ip;
+  }
+  const fwd = reqHeaders.get("x-forwarded-for");
+  if (fwd) {
+    const first = fwd.split(",")[0].trim();
+    const ip = normalizeIp(first);
+    if (ip) return ip;
+  }
+  return "local";
+}
+
 export function clientIp(req: Request): string {
-  const fwd = req.headers.get("x-forwarded-for");
-  return fwd ? fwd.split(",")[0].trim() : "local";
+  return clientIpFromHeaders(req.headers);
 }

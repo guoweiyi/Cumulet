@@ -43,6 +43,7 @@ enum FormSchemaStatus {
 enum ProvisioningStepType {
   VALIDATE_VMID
   CLOUD_INIT
+  DATABASE_BOOTSTRAP
   PVE_SECURITY_GROUP
   EXTERNAL_ACCESS
   JS_ASSET
@@ -409,6 +410,7 @@ model ProvisioningStep {
   status       ProvisioningStepStatus @default(PENDING)
   position     Int                    @default(0)
   errorMessage String?                @db.Text
+  outputEnc    String?                @db.LongText
   attempts     Int                    @default(0)
   startedAt    DateTime?
   finishedAt   DateTime?

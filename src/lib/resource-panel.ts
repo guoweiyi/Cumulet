@@ -19,6 +19,12 @@ export async function loadResourcePanel(bindingId: string) {
   const jumpserver = await getSetting("jumpserver");
   const owner = binding.ticket.user;
 
+  // Logs are no longer shown on the server detail page. Filter them at render
+  // time so existing workflow definitions keep parsing, without a migration.
+  const detailModules = (definition?.detailModules ?? [...DETAIL_MODULES]).filter(
+    (module) => module !== "logs",
+  );
+
   return {
     binding: {
       id: binding.id,
@@ -32,6 +38,6 @@ export async function loadResourcePanel(bindingId: string) {
       jsAssetPath: jumpServerUserAssetPath(owner.realName ?? owner.nickname ?? owner.email),
     },
     jsPortalUrl: jumpserver?.baseUrl ? jumpServerLunaUrl(jumpserver.baseUrl) : null,
-    detailModules: (definition?.detailModules ?? [...DETAIL_MODULES]) as DetailModule[],
+    detailModules: detailModules as DetailModule[],
   };
 }

@@ -121,6 +121,7 @@ function GroupsPane({ canWrite, nodes }: { canWrite: boolean; nodes: { id: strin
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [ruleOpen, setRuleOpen] = useState(false);
+  const [copyOpen, setCopyOpen] = useState(false);
 
   const loadGroups = useCallback(async () => {
     setLoading(true);
@@ -253,6 +254,9 @@ function GroupsPane({ canWrite, nodes }: { canWrite: boolean; nodes: { id: strin
                     <Button size="sm" variant="outline" onClick={() => setRuleOpen(true)}>
                       <Plus className="size-3.5" /> {t("rules")}
                     </Button>
+                    <Button size="sm" variant="outline" onClick={() => setCopyOpen(true)}>
+                      <Copy className="size-3.5" /> {t("copyGroup")}
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -337,6 +341,18 @@ function GroupsPane({ canWrite, nodes }: { canWrite: boolean; nodes: { id: strin
           open={ruleOpen}
           onOpenChange={setRuleOpen}
           onDone={() => loadRules(selected)}
+        />
+      )}
+      {canWrite && selected && (
+        <CopyGroupDialog
+          source={selected}
+          sourceGroup={groups.find((g) => g.name === selected)}
+          open={copyOpen}
+          onOpenChange={setCopyOpen}
+          onDone={(newName) => {
+            setSelected(newName);
+            void loadGroups();
+          }}
         />
       )}
     </div>
@@ -568,6 +584,122 @@ function CreateGroupDialog({
           </Button>
           <Button disabled={busy || !form.name} onClick={create}>
             {tc("create")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CopyGroupDialog({
+  source,
+  sourceGroup,
+  open,
+  onOpenChange,
+  onDone,
+}: {
+  source: string;
+  sourceGroup?: Group;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onDone: (newName: string) => void;
+}) {
+  const t = useTranslations("admin.sg");
+  const tc = useTranslations("common");
+  const [form, setForm] = useState({ name: "", zh: "", en: "", scope: "ADMIN_ONLY", isDefault: false });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const base = source.length > 24 ? source.slice(0, 24) : source;
+    setForm({
+      name: `${base}-copy`,
+      zh: sourceGroup?.description?.zh ?? "",
+      en: sourceGroup?.description?.en ?? "",
+      scope: sourceGroup?.scope ?? "ADMIN_ONLY",
+      isDefault: false,
+    });
+  }, [open, source, sourceGroup]);
+
+  async function copy() {
+    if (form.name === source) {
+      toast.error(t("copySameName"));
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/admin/firewall/groups/${encodeURIComponent(source)}/copy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: form.name,
+          description: form.zh ? { zh: form.zh, en: form.en || undefined } : null,
+          scope: form.scope,
+          isProvisioningDefault: form.isDefault,
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        const code = data?.error?.message;
+        toast.error(
+          code === "group_exists"
+            ? t("copyExists")
+            : code === "copy_same_name"
+              ? t("copySameName")
+              : tc("requestFailed"),
+        );
+        return;
+      }
+      toast.success(t("copySuccess"));
+      onOpenChange(false);
+      onDone(form.name);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t("copyGroupTitle", { name: source })}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">{t("copyHint")}</p>
+          <Labeled label={t("copyName")}>
+            <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="web-basic-copy" />
+          </Labeled>
+          <div className="grid grid-cols-2 gap-3">
+            <Labeled label={t("descZh")}>
+              <Input value={form.zh} onChange={(e) => setForm({ ...form, zh: e.target.value })} />
+            </Labeled>
+            <Labeled label={t("descEn")}>
+              <Input value={form.en} onChange={(e) => setForm({ ...form, en: e.target.value })} />
+            </Labeled>
+          </div>
+          <Labeled label={t("scope")}>
+            <Select value={form.scope} onValueChange={(v) => setForm({ ...form, scope: v })}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ADMIN_ONLY">{t("adminOnly")}</SelectItem>
+                <SelectItem value="SHARED">{t("shared")}</SelectItem>
+              </SelectContent>
+            </Select>
+          </Labeled>
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={form.isDefault} onCheckedChange={(v) => setForm({ ...form, isDefault: v })} />
+            {t("provisioningDefault")}
+          </label>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            {tc("cancel")}
+          </Button>
+          <Button disabled={busy || !form.name} onClick={copy}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            {t("copyGroup")}
           </Button>
         </DialogFooter>
       </DialogContent>

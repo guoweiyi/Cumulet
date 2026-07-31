@@ -20,6 +20,9 @@ const handle = app.getRequestHandler();
 const cronToken = process.env.INTERNAL_CRON_TOKEN || crypto.randomBytes(32).toString("hex");
 process.env.INTERNAL_CRON_TOKEN = cronToken;
 const workerId = crypto.randomUUID();
+// Must match src/lib/rate-limit.ts. Stamped with the real TCP peer address so
+// per-IP rate limits cannot be bypassed by spoofing X-Forwarded-For.
+const REAL_IP_HEADER = "x-cumulet-real-ip";
 const canonicalOrigin = (() => {
   try { return new URL(process.env.NEXTAUTH_URL || `http://localhost:${port}`).origin; }
   catch { return `http://localhost:${port}`; }
@@ -41,11 +44,17 @@ function decryptToken(token) {
 }
 
 app.prepare().then(() => {
-  const server = createServer((req, res) => handle(req, res));
+  const server = createServer((req, res) => {
+    // Overwrite any client-supplied value; the socket address is the only
+    // trusted source behind this custom server.
+    req.headers[REAL_IP_HEADER] = req.socket.remoteAddress;
+    handle(req, res);
+  });
   const nextUpgrade = app.getUpgradeHandler();
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req, socket, head) => {
+    req.headers[REAL_IP_HEADER] = socket.remoteAddress;
     let url;
     try {
       url = new URL(req.url, "http://localhost");

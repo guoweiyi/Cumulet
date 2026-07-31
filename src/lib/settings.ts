@@ -60,6 +60,20 @@ export type OidcSettings = {
   clientSecret: string;
 };
 
+export type BrandingSettings = {
+  appTitle: string; // empty = fall back to the i18n app name
+  logoUrl: string; // http(s) URL or data:image/... URL; empty = default icon
+  icpEnabled: boolean; // show the filing line in the app footer
+  icpText: string; // e.g. 京ICP备00000000号
+};
+
+export type AgreementSettings = {
+  enabled: boolean; // require the checkbox on the request page
+  labelTemplate: string; // hint text, may contain {link} placeholder
+  linkText: string; // anchor text shown in place of {link}
+  linkUrl: string; // http(s) URL of the agreement page
+};
+
 type SettingsMap = {
   smtp: SmtpSettings;
   jumpserver: JumpServerSettings;
@@ -67,6 +81,8 @@ type SettingsMap = {
   provisioning: ProvisioningSettings;
   ai: AiSettings;
   oidc: OidcSettings;
+  branding: BrandingSettings;
+  agreement: AgreementSettings;
 };
 
 const SECRET_FIELDS: Record<keyof SettingsMap, string[]> = {
@@ -76,6 +92,22 @@ const SECRET_FIELDS: Record<keyof SettingsMap, string[]> = {
   provisioning: [],
   ai: ["apiKey"],
   oidc: ["clientSecret"],
+  branding: [],
+  agreement: [],
+};
+
+export const BRANDING_DEFAULTS: BrandingSettings = {
+  appTitle: "",
+  logoUrl: "",
+  icpEnabled: false,
+  icpText: "",
+};
+
+export const AGREEMENT_DEFAULTS: AgreementSettings = {
+  enabled: false,
+  labelTemplate: "我已阅读并同意 {link}",
+  linkText: "《用户协议》",
+  linkUrl: "",
 };
 
 export const DEFAULTS: { defaultQuota: DefaultQuotaSettings } = {
@@ -149,6 +181,18 @@ export async function getDefaultQuota(): Promise<DefaultQuotaSettings> {
     maxDiskGB: legacy.maxDiskGB ?? legacy.maxDiskGb ?? 100,
     maxFirewallRules: legacy.maxFirewallRules,
   };
+}
+
+/** Branding with sane defaults; never returns null (UI can rely on it). */
+export async function getBranding(): Promise<BrandingSettings> {
+  const stored = await getSetting("branding");
+  return { ...BRANDING_DEFAULTS, ...(stored ?? {}) };
+}
+
+/** Request-page agreement checkbox settings with defaults. */
+export async function getAgreement(): Promise<AgreementSettings> {
+  const stored = await getSetting("agreement");
+  return { ...AGREEMENT_DEFAULTS, ...(stored ?? {}) };
 }
 
 /** DB configuration wins; environment values are a migration fallback only. */

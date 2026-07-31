@@ -9,18 +9,22 @@ import {
   toClientSafe,
   getDefaultQuota,
   getEffectiveOidcSettings,
+  getBranding,
+  getAgreement,
 } from "@/lib/settings";
 
 /** All settings, secrets stripped (write-only in the UI). SUPER_ADMIN only. */
 export const GET = api(async () => {
   await requireSuperAdmin();
-  const [smtp, jumpserver, provisioning, ai, oidc, defaultQuota] = await Promise.all([
+  const [smtp, jumpserver, provisioning, ai, oidc, defaultQuota, branding, agreement] = await Promise.all([
     getSetting("smtp"),
     getSetting("jumpserver"),
     getSetting("provisioning"),
     getSetting("ai"),
     getEffectiveOidcSettings(),
     getDefaultQuota(),
+    getBranding(),
+    getAgreement(),
   ]);
   return json({
     smtp: toClientSafe("smtp", smtp),
@@ -29,6 +33,8 @@ export const GET = api(async () => {
     ai: toClientSafe("ai", ai),
     oidc: toClientSafe("oidc", oidc),
     defaultQuota,
+    branding,
+    agreement,
   });
 });
 
@@ -63,6 +69,43 @@ const quotaSchema = z.object({
   maxDiskGB: z.number().int().min(1).max(1024 * 1024),
   maxFirewallRules: z.number().int().min(0).max(1000),
 });
+
+function safeLogoUrl(value: string): boolean {
+  if (!value) return true;
+  if (value.startsWith("data:image/")) {
+    return value.length <= 512 * 1024 && /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,[a-z0-9+/=\s]+$/i.test(value);
+  }
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol);
+  } catch {
+    return false;
+  }
+}
+
+const brandingSchema = z.object({
+  appTitle: z.string().trim().max(64),
+  logoUrl: z.string().max(512 * 1024).refine(safeLogoUrl),
+  icpEnabled: z.boolean(),
+  icpText: z.string().trim().max(128),
+});
+
+const agreementSchema = z
+  .object({
+    enabled: z.boolean(),
+    labelTemplate: z.string().trim().min(1).max(200),
+    linkText: z.string().trim().min(1).max(100),
+    linkUrl: z
+      .string()
+      .trim()
+      .max(512)
+      .refine((u) => u === "" || u.startsWith("https://") || u.startsWith("http://")),
+  })
+  .superRefine((value, ctx) => {
+    if (value.enabled && !value.linkUrl) {
+      ctx.addIssue({ code: "custom", path: ["linkUrl"], message: "required" });
+    }
+  });
 
 function safeAiBaseUrl(value: string): boolean {
   try {
@@ -115,7 +158,7 @@ const oidcSchema = z.object({
 });
 
 const bodySchema = z.object({
-  section: z.enum(["smtp", "jumpserver", "provisioning", "defaultQuota", "ai", "oidc"]),
+  section: z.enum(["smtp", "jumpserver", "provisioning", "defaultQuota", "ai", "oidc", "branding", "agreement"]),
   value: z.unknown(),
 });
 
@@ -166,6 +209,18 @@ export const PUT = api(async (req: NextRequest) => {
       };
       if (next.enabled && !next.clientSecret) throw badRequest("oidc_secret_required");
       await setSetting("oidc", next, user.id);
+      break;
+    }
+    case "branding": {
+      const v = brandingSchema.safeParse(value);
+      if (!v.success) throw badRequest("invalid_branding");
+      await setSetting("branding", v.data, user.id);
+      break;
+    }
+    case "agreement": {
+      const v = agreementSchema.safeParse(value);
+      if (!v.success) throw badRequest("invalid_agreement");
+      await setSetting("agreement", v.data, user.id);
       break;
     }
   }

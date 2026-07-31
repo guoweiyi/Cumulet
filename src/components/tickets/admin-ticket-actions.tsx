@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import { CheckCircle2, Eye, EyeOff, Loader2, RefreshCw, ShieldAlert, Trash2, XCircle } from "lucide-react";
 import { localized, type I18nText } from "@/i18n/config";
 import type { TicketDetailData } from "@/lib/ticket-data";
+import type { ApprovalField, StepConfig } from "@/lib/workflow-definition";
+import type { Field } from "@/lib/form-engine/types";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -51,6 +53,8 @@ type ProvisionOptions = {
     name: I18nText;
     resourceType: string;
     steps: string[];
+    approvalFields: ApprovalField[];
+    stepConfigs: Record<string, StepConfig>;
   } | null;
 };
 
@@ -59,6 +63,31 @@ function generateInitialPassword(): string {
   const bytes = new Uint32Array(18);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (value) => alphabet[value % alphabet.length]).join("");
+}
+
+/** Parse the raw `over_quota` payload (JSON) into the dimensions that exceed quota. */
+function quotaBreakdown(
+  raw: string,
+): { kind: "cpu" | "ram" | "disk"; value: number; max: number }[] | null {
+  try {
+    const { quota, usage } = JSON.parse(raw) as {
+      quota?: Record<string, number>;
+      usage?: Record<string, number>;
+    };
+    const parts: { kind: "cpu" | "ram" | "disk"; value: number; max: number }[] = [];
+    if ((usage?.cpuCores ?? 0) > (quota?.maxCpuCores ?? Infinity)) {
+      parts.push({ kind: "cpu", value: usage?.cpuCores ?? 0, max: quota?.maxCpuCores ?? 0 });
+    }
+    if ((usage?.ramGB ?? 0) > (quota?.maxRamGB ?? Infinity)) {
+      parts.push({ kind: "ram", value: usage?.ramGB ?? 0, max: quota?.maxRamGB ?? 0 });
+    }
+    if ((usage?.diskGB ?? 0) > (quota?.maxDiskGB ?? Infinity)) {
+      parts.push({ kind: "disk", value: usage?.diskGB ?? 0, max: quota?.maxDiskGB ?? 0 });
+    }
+    return parts;
+  } catch {
+    return null;
+  }
 }
 
 /** Approve & Provision / Reject / Close / Deprovision buttons + dialogs. */
@@ -70,6 +99,7 @@ export function AdminTicketActions({
   reload: () => void;
 }) {
   const t = useTranslations("admin.ticket");
+  const tw = useTranslations("admin.workflow");
   const tc = useTranslations("common");
   const locale = useLocale();
   const externalRequested = [ticket.values.external_access, ticket.values.public_site].some(
@@ -83,6 +113,9 @@ export function AdminTicketActions({
 
   const [options, setOptions] = useState<ProvisionOptions | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [showWorkflowSecrets, setShowWorkflowSecrets] = useState(false);
+  const [workflowInputs, setWorkflowInputs] = useState<Record<string, string | number | boolean>>({});
+  const [valuesOverride, setValuesOverride] = useState<Record<string, unknown>>({});
   const [form, setForm] = useState({
     pveNodeId: "",
     vmid: "",
@@ -113,6 +146,16 @@ export function AdminTicketActions({
       .then((data: ProvisionOptions | null) => {
         if (!data) return;
         setOptions(data);
+        setValuesOverride(Object.fromEntries(
+          (ticket.definition.fields ?? []).map((field) => [
+            field.id,
+            ticket.values[field.id] ?? field.defaultValue,
+          ]),
+        ));
+        setWorkflowInputs(Object.fromEntries((data.workflow?.approvalFields ?? []).map((field) => [
+          field.key,
+          field.defaultValue ?? (field.type === "boolean" ? false : field.type === "password" ? generateInitialPassword() : ""),
+        ])));
         const gateway = data.gateways[0];
         const zone = data.dnsZones[0];
         setForm((f) => ({
@@ -129,7 +172,7 @@ export function AdminTicketActions({
           dnsZoneId: zone?.id ?? "",
         }));
       });
-  }, [approveOpen, options, ticket.id]);
+  }, [approveOpen, options, ticket.id, ticket.definition.fields, ticket.values]);
 
   async function post(url: string, body?: unknown): Promise<boolean> {
     setBusy(true);
@@ -141,7 +184,30 @@ export function AdminTicketActions({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
-        toast.error(data?.error?.message ?? tc("requestFailed"));
+        const breakdown =
+          data?.error?.code === "over_quota" && typeof data?.error?.message === "string"
+            ? quotaBreakdown(data.error.message)
+            : null;
+        if (breakdown) {
+          const detail = breakdown
+            .map((item) =>
+              item.kind === "cpu"
+                ? t("overQuotaCpu", { value: item.value, max: item.max })
+                : item.kind === "ram"
+                  ? t("overQuotaRam", { value: item.value, max: item.max })
+                  : t("overQuotaDisk", { value: item.value, max: item.max }),
+            )
+            .join("；");
+          toast.error(
+            breakdown.length
+              ? `${t("overQuotaTitle")} ${detail}`
+              : t("overQuotaGeneric"),
+          );
+        } else if (data?.error?.code === "resource_capacity_missing") {
+          toast.error(t("resourceCapacityMissing"));
+        } else {
+          toast.error(data?.error?.message ?? tc("requestFailed"));
+        }
         return false;
       }
       reload();
@@ -174,6 +240,8 @@ export function AdminTicketActions({
   const availableGateways = options?.gateways ?? [];
   const availableDnsZones = options?.dnsZones ?? [];
   const externalAccessSupported = options?.workflow?.steps.includes("EXTERNAL_ACCESS") ?? false;
+  const securityGroupSupported = options?.workflow?.steps.includes("PVE_SECURITY_GROUP") ?? false;
+  const externalEnabled = externalAccessSupported && form.externalEnabled;
 
   if (ticket.isSystemAlert) {
     return status === "CLOSED" ? null : (
@@ -244,7 +312,31 @@ export function AdminTicketActions({
                 ) : (
                   <span className="font-medium text-red-600">{t("workflowMissing")}</span>
                 )}
+                {options.workflow && <div className="mt-2 space-y-1 border-t pt-2">{options.workflow.steps.map((step, index) => { const config = options.workflow?.stepConfigs[step]; return <div key={step} className="flex items-start gap-2 text-xs"><span className="w-5 shrink-0 text-neutral-400">{index + 1}.</span><div className="min-w-0 flex-1"><span className="font-medium">{config?.name ? localized(config.name, locale) : tw(`step.${step}` as never)}</span>{config?.description && <span className="ml-2 text-neutral-500">{localized(config.description, locale)}</span>}</div><span className="shrink-0 text-neutral-400">{config?.requests.length ?? 0} HTTP · {config?.timeoutSeconds}s · {config?.failurePolicy === "SKIP" ? tw("failureSkip") : tw("failureStop")}</span></div>; })}</div>}
               </div>
+              {(ticket.definition.fields?.length ?? 0) > 0 && (
+                <div className="col-span-2 rounded-md border border-blue-100 bg-blue-50/30 px-3 py-2">
+                  <Label>{t("requestParameters")}</Label>
+                  <p className="mt-0.5 text-xs text-neutral-500">{t("requestParametersHint")}</p>
+                  <div className="mt-2 grid grid-cols-2 gap-3">
+                    {ticket.definition.fields.map((field) => (
+                      <Field
+                        key={field.id}
+                        label={localized(field.label, locale)}
+                        hint={field.hint ? localized(field.hint, locale) : undefined}
+                      >
+                        <RequestValueEditor
+                          field={field}
+                          value={valuesOverride[field.id]}
+                          onChange={(value) =>
+                            setValuesOverride((current) => ({ ...current, [field.id]: value }))
+                          }
+                        />
+                      </Field>
+                    ))}
+                  </div>
+                </div>
+              )}
               <Field label={t("azNode")}>
                 <Select
                   value={form.pveNodeId}
@@ -316,14 +408,16 @@ export function AdminTicketActions({
                   placeholder="223.5.5.5"
                 />
               </Field>
-              <div className="col-span-2 flex items-center justify-between gap-4 border-t border-neutral-200 pt-3">
-                <div>
-                  <Label>{t("configureSecurityGroup")}</Label>
-                  <p className="mt-0.5 text-xs text-neutral-500">{t("configureSecurityGroupHint")}</p>
+              {securityGroupSupported && (
+                <div className="col-span-2 flex items-center justify-between gap-4 border-t border-neutral-200 pt-3">
+                  <div>
+                    <Label>{t("configureSecurityGroup")}</Label>
+                    <p className="mt-0.5 text-xs text-neutral-500">{t("configureSecurityGroupHint")}</p>
+                  </div>
+                  <Switch checked={form.configureSecurityGroup} onCheckedChange={(checked) => setForm({ ...form, configureSecurityGroup: checked })} />
                 </div>
-                <Switch checked={form.configureSecurityGroup} onCheckedChange={(checked) => setForm({ ...form, configureSecurityGroup: checked })} />
-              </div>
-              {form.configureSecurityGroup && (
+              )}
+              {securityGroupSupported && form.configureSecurityGroup && (
                 <Field label={t("securityGroup")}>
                   <Select value={form.securityGroup} onValueChange={(v) => setForm({ ...form, securityGroup: v })}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -335,6 +429,9 @@ export function AdminTicketActions({
                       ))}
                     </SelectContent>
                   </Select>
+                  {options.securityGroups.length === 0 && (
+                    <p className="text-[10px] text-amber-600">{t("sgMissing")}</p>
+                  )}
                 </Field>
               )}
               <Field label={t("leaseDurationDays")}>
@@ -357,6 +454,7 @@ export function AdminTicketActions({
                   />
                 </Field>
               </div>
+              {(options.workflow?.approvalFields.length ?? 0) > 0 && <div className="col-span-2 border-t pt-3"><div className="mb-3 flex items-center justify-between"><div><Label>{t("workflowVariables")}</Label><p className="text-xs text-neutral-500">{t("workflowVariablesHint")}</p></div>{options.workflow?.approvalFields.some((field) => field.type === "password") && <Button type="button" size="sm" variant="ghost" onClick={() => setShowWorkflowSecrets((value) => !value)}>{showWorkflowSecrets ? <EyeOff className="size-4" /> : <Eye className="size-4" />}{showWorkflowSecrets ? t("hidePassword") : t("showPassword")}</Button>}</div><div className="grid grid-cols-2 gap-3">{options.workflow?.approvalFields.map((field) => <DynamicApprovalField key={field.key} field={field} value={workflowInputs[field.key]} revealSecrets={showWorkflowSecrets} onChange={(value) => setWorkflowInputs((current) => ({ ...current, [field.key]: value }))} />)}</div></div>}
               {externalAccessSupported && <div className="col-span-2 border-t border-neutral-200 pt-3">
                 <div className="flex items-center justify-between gap-4">
                   <div>
@@ -368,6 +466,9 @@ export function AdminTicketActions({
                     onCheckedChange={(checked) => setForm({ ...form, externalEnabled: checked })}
                   />
                 </div>
+                {externalRequested && availableGateways.length === 0 && (
+                  <p className="mt-2 text-xs text-amber-600">{t("gatewayMissing")}</p>
+                )}
               </div>}
               {externalAccessSupported && form.externalEnabled && (
                 <>
@@ -464,16 +565,17 @@ export function AdminTicketActions({
                 !form.internalIp ||
                 !/^[a-z_][a-z0-9_-]{0,31}$/.test(form.ciUser) ||
                 form.initialPassword.length < 8 ||
-                (form.configureSecurityGroup && !form.securityGroup) ||
+                !!options.workflow?.approvalFields.some((field) => field.required && (workflowInputs[field.key] === "" || workflowInputs[field.key] === undefined)) ||
+                (securityGroupSupported && form.configureSecurityGroup && !form.securityGroup) ||
                 !form.leaseDurationDays ||
-                (form.externalEnabled && (
+                (externalEnabled && (
                   !form.gatewayId ||
                   !form.internalPort ||
                   (form.protocol === "TCP" ? !form.externalPort : !form.hostname)
                 ))
               }
               onClick={async () => {
-                const externalAccess = form.externalEnabled
+                const externalAccess = externalEnabled
                   ? {
                       gatewayId: form.gatewayId,
                       protocol: form.protocol,
@@ -494,9 +596,11 @@ export function AdminTicketActions({
                     sshKeys: form.sshKeys,
                     nameserver: form.nameserver,
                     ipconfig: form.ipconfig,
-                    configureSecurityGroup: form.configureSecurityGroup,
-                    securityGroup: form.securityGroup,
+                    configureSecurityGroup: securityGroupSupported && form.configureSecurityGroup,
+                    securityGroup: securityGroupSupported && form.configureSecurityGroup ? form.securityGroup : undefined,
                     leaseDurationDays: Number(form.leaseDurationDays),
+                    workflowInputs,
+                    valuesOverride,
                     externalAccess,
                   })
                 ) {
@@ -573,6 +677,60 @@ export function AdminTicketActions({
       </Dialog>
     </div>
   );
+}
+
+function DynamicApprovalField({ field, value, revealSecrets, onChange }: { field: ApprovalField; value: string | number | boolean | undefined; revealSecrets: boolean; onChange: (value: string | number | boolean) => void }) {
+  const locale = useLocale();
+  if (field.type === "boolean") return <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"><div><Label>{localized(field.label, locale)}</Label>{field.description && <p className="text-[10px] text-neutral-400">{localized(field.description, locale)}</p>}</div><Switch checked={value === true} onCheckedChange={onChange} /></div>;
+  if (field.type === "select") return <Field label={localized(field.label, locale)} hint={field.description ? localized(field.description, locale) : undefined}><Select value={String(value ?? "")} onValueChange={onChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{field.options?.map((option) => <SelectItem key={option.value} value={option.value}>{localized(option.label, locale)}</SelectItem>)}</SelectContent></Select></Field>;
+  return <Field label={localized(field.label, locale)} hint={field.description ? localized(field.description, locale) : undefined}><Input type={field.type === "password" && !revealSecrets ? "password" : field.type === "number" ? "number" : "text"} value={String(value ?? "")} autoComplete={field.type === "password" ? "new-password" : undefined} onChange={(event) => onChange(field.type === "number" ? Number(event.target.value) : event.target.value)} /></Field>;
+}
+
+/** Type-aware editor for the requester's submitted form values (admin-adjustable). */
+function RequestValueEditor({
+  field,
+  value,
+  onChange,
+}: {
+  field: Field;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const locale = useLocale();
+  if (field.type === "toggle") {
+    return <Switch checked={value === true} onCheckedChange={(checked) => onChange(checked === true)} />;
+  }
+  if (field.type === "dropdown" || field.type === "radio_card") {
+    return (
+      <Select value={String(value ?? "")} onValueChange={onChange}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {(field.props?.options ?? []).map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {localized(option.label, locale)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    );
+  }
+  if (field.type === "stepper" || field.type === "slider") {
+    return (
+      <Input
+        type="number"
+        min={field.props?.min}
+        max={field.props?.max}
+        step={field.props?.step}
+        value={String(value ?? "")}
+        onChange={(event) =>
+          onChange(event.target.value === "" ? "" : Number(event.target.value))
+        }
+      />
+    );
+  }
+  return <Input value={String(value ?? "")} onChange={(event) => onChange(event.target.value)} />;
 }
 
 function Field({

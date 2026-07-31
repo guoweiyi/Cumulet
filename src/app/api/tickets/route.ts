@@ -6,6 +6,7 @@ import { requireOnboardedUser, requireUser } from "@/lib/guards";
 import { audit } from "@/lib/audit";
 import { validateSubmission, type FormDefinition } from "@/lib/form-engine";
 import { LIMITS, rateLimit } from "@/lib/rate-limit";
+import { getAgreement } from "@/lib/settings";
 
 /** The caller's own tickets — never anyone else's. */
 export const GET = api(async () => {
@@ -42,6 +43,12 @@ export const POST = api(async (req: NextRequest) => {
   // Server-side re-validation: recompute visibility, strip hidden fields.
   const result = validateSubmission(definition, body.values as Record<string, unknown>);
   if (!result.ok) return json({ error: { code: "validation", fields: result.errors } }, 422);
+
+  // Enforce the customizable agreement checkbox server-side as well.
+  const agreement = await getAgreement();
+  if (agreement.enabled && body.agreed !== true) {
+    return json({ error: { code: "agreement_required", fields: {} } }, 422);
+  }
 
   const ticket = await prisma.ticket.create({
     data: {

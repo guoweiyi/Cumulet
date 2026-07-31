@@ -1,0 +1,11 @@
+ALTER TABLE `ProvisioningStep`
+  MODIFY COLUMN `step` ENUM(
+    'VALIDATE_VMID',
+    'CLOUD_INIT',
+    'DATABASE_BOOTSTRAP',
+    'PVE_SECURITY_GROUP',
+    'EXTERNAL_ACCESS',
+    'JS_ASSET',
+    'JS_PERMISSION',
+    'NOTIFY'
+  ) NOT NULL;

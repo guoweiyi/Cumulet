@@ -69,7 +69,6 @@ export class JumpServerClient {
     const org = this.cfg.orgId || "00000000-0000-0000-0000-000000000002";
     if (this.cfg.authMode === "access_key") {
       // GMT date, RFC1123; signature over the three headers JumpServer expects.
-      const date = new Date(Date.UTC(2020, 0, 1)).toUTCString(); // replaced below
       const now = gmtDate();
       const accept = "application/json";
       const signingString = `(request-target): ${method.toLowerCase()} ${path}\naccept: ${accept}\ndate: ${now}`;
@@ -77,7 +76,6 @@ export class JumpServerClient {
         .update(signingString)
         .digest("base64");
       const auth = `Signature keyId="${this.cfg.accessKeyId}",algorithm="hmac-sha256",headers="(request-target) accept date",signature="${signature}"`;
-      void date;
       return {
         Authorization: auth,
         Accept: accept,
@@ -229,6 +227,43 @@ export class JumpServerClient {
 
   async deleteHost(id: string): Promise<void> {
     await this.request("DELETE", `/api/v1/assets/hosts/${id}/`);
+  }
+
+  /** Idempotent lookup of a managed credential account on an asset. */
+  async findAccount(assetId: string, username: string): Promise<{ id: string } | null> {
+    const accounts = await this.request<
+      { results?: { id: string; username: string }[] } | { id: string; username: string }[]
+    >(
+      "GET",
+      `/api/v1/accounts/accounts/?asset=${encodeURIComponent(assetId)}&username=${encodeURIComponent(username)}`,
+    );
+    const list = Array.isArray(accounts) ? accounts : (accounts.results ?? []);
+    const match = list.find((account) => account.username === username);
+    return match ? { id: match.id } : null;
+  }
+
+  /**
+   * Create a managed account bound to an existing asset. The secret is
+   * write-only from the client's perspective; JumpServer encrypts it at rest.
+   */
+  async createAccount(opts: {
+    assetId: string;
+    username: string;
+    secret: string;
+  }): Promise<{ id: string }> {
+    const account = await this.request<{ id: string }>("POST", "/api/v1/accounts/accounts/", {
+      asset: opts.assetId,
+      username: opts.username,
+      secret_type: "password",
+      secret: opts.secret,
+      is_active: true,
+    });
+    return { id: account.id };
+  }
+
+  /** Keep an existing account's secret in sync (idempotent re-run). */
+  async updateAccountSecret(id: string, secret: string): Promise<void> {
+    await this.request("PATCH", `/api/v1/accounts/accounts/${id}/`, { secret });
   }
 
   async createAssetPermission(opts: {

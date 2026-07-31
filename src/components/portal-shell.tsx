@@ -17,6 +17,7 @@ import {
 import { cn } from "@/lib/utils";
 import { LanguageSwitcher } from "./language-switcher";
 import { UserMenu } from "./user-menu";
+import type { BrandingSettings } from "@/lib/settings";
 
 const NAV = [
   { href: "/", key: "dashboard", icon: LayoutDashboard, exact: true },
@@ -28,22 +29,32 @@ const NAV = [
 export function PortalShell({
   children,
   user,
+  branding,
 }: {
   children: ReactNode;
   user: { name: string; email: string; isAdmin: boolean };
+  branding: BrandingSettings;
 }) {
   const t = useTranslations("nav");
   const tc = useTranslations("common");
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(false);
+  // The console popup should maximize the remote screen: start with the
+  // sidebar collapsed and without the page's inner padding on console routes.
+  const consolePage = pathname.startsWith("/servers/") && pathname.endsWith("/console");
+  const [collapsed, setCollapsed] = useState(consolePage);
 
   return (
     <div className="flex min-h-screen flex-col">
       {/* Slim top nav */}
       <header className="sticky top-0 z-40 flex h-12 items-center gap-3 border-b border-border bg-card px-4">
         <Link href="/" className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-          <Cloud className="size-5 text-brand" strokeWidth={2} />
-          {tc("appName")}
+          {branding.logoUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={branding.logoUrl} alt="" className="h-6 w-auto max-w-32 object-contain" />
+          ) : (
+            <Cloud className="size-5 text-brand" strokeWidth={2} />
+          )}
+          {branding.appTitle || tc("appName")}
         </Link>
         <div className="flex-1" />
         <LanguageSwitcher />
@@ -97,8 +108,28 @@ export function PortalShell({
           </nav>
         </aside>
 
-        <main className="min-w-0 flex-1 p-6">{children}</main>
+        <main className={cn("min-w-0 flex-1", consolePage ? "overflow-hidden" : "p-6")}>
+          {children}
+        </main>
       </div>
+
+      <footer className="border-t border-border bg-card px-4 py-4">
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-1 text-center text-xs text-muted-foreground">
+          <p>
+            © {new Date().getFullYear()} {branding.appTitle || tc("appName")}
+          </p>
+          {branding.icpEnabled && branding.icpText && (
+            <a
+              href="https://beian.miit.gov.cn/"
+              target="_blank"
+              rel="noreferrer"
+              className="transition-colors hover:text-foreground"
+            >
+              {branding.icpText}
+            </a>
+          )}
+        </div>
+      </footer>
     </div>
   );
 }

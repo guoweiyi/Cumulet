@@ -65,6 +65,8 @@ export const GET = api(async (req: NextRequest) => {
       name: workflow.meta.name,
       resourceType: workflow.meta.resourceType,
       steps: workflow.steps,
+      approvalFields: workflow.approvalFields,
+      stepConfigs: workflow.stepConfigs,
     } : null,
     defaultCiUser: "ubuntu",
     defaultLeaseDurationDays: 30,
