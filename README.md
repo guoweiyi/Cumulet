@@ -10,8 +10,6 @@
 
 ✅ 接入 AI 能力，完成自动化巡检、问题处理
 
-**简体中文** | [English](./README.en.md)
-
 ## 核心工作流
 
 1. **自助申请**：用户登录（可接入单点登录），提交虚拟机等资源的使用申请。
@@ -40,7 +38,7 @@ docker compose up -d          # 一键运行
 
 Next.js 16 · React 19 · TypeScript · Prisma 6 · MySQL 8 · Auth.js v5 · next-intl · Tailwind CSS 4
 
-## 本地二开
+## 开发指南
 
 需要 Node.js 20+ 与 MySQL 8。
 

@@ -1,15 +1,3 @@
-# =============================================================================
-# Cumulet — deployment against an EXISTING MySQL 8 database
-#
-#   cd deploy
-#   cp .env.example .env
-#   # set EXTERNAL_DATABASE_URL (the hostname is resolved by the Docker host;
-#   # use host.docker.internal for a database on the host machine)
-#   docker compose -f docker-compose.external-db.yml up -d
-#
-# The container runs `prisma migrate deploy` on startup and then starts the
-# app. The external database must be MySQL 8 and reachable from the container.
-# =============================================================================
 name: cumulet-external-db
 
 services:

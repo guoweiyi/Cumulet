@@ -1,13 +1,3 @@
-# =============================================================================
-# Cumulet — One-click deployment (bundled MySQL via Docker)
-#
-#   cd deploy
-#   cp .env.example .env   # fill in passwords / secrets
-#   docker compose up -d
-#
-# The app image is pulled from IMAGE (default: Docker Hub). Override it in .env if
-# you mirror the image to your own registry.
-# =============================================================================
 name: cumulet
 
 services:
