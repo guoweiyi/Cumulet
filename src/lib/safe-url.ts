@@ -1,29 +1,35 @@
 import "server-only";
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { BlockList, isIP } from "node:net";
 import { Agent } from "undici";
 
-const IPV4_PRIVATE = [
-  /^10\./,
-  /^127\./,
-  /^169\.254\./,
-  /^192\.168\./,
-  /^172\.(1[6-9]|2\d|3[01])\./,
-  /^0\./,
-  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
-  /^192\.0\.0\./,
-  /^198\.1[89]\./,
-  /^224\./,
-  /^2(?:2[5-9]|3\d|4\d|5[0-5])\./,
-];
+// Webhooks are allowed to reach globally routable addresses only. In addition
+// to RFC 1918 space, deny loopback, link-local, carrier NAT, documentation,
+// benchmarking, multicast, and otherwise reserved ranges. This avoids SSRF
+// bypasses through less familiar IP spellings/ranges (especially IPv6).
+const NON_PUBLIC_V4 = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10],
+  ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12],
+  ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.168.0.0", 16],
+  ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24],
+  ["224.0.0.0", 4], ["240.0.0.0", 4],
+] as const) NON_PUBLIC_V4.addSubnet(network, prefix, "ipv4");
+const NON_PUBLIC_V6 = new BlockList();
+for (const [network, prefix] of [
+  ["::", 128], ["::1", 128], ["::ffff:0:0", 96],
+  ["64:ff9b:1::", 48], ["100::", 64], ["2001:2::", 48],
+  ["2001:10::", 28], ["2001:db8::", 32], ["fc00::", 7],
+  ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
+] as const) NON_PUBLIC_V6.addSubnet(network, prefix, "ipv6");
 
 export function isPrivateAddress(address: string): boolean {
-  if (isIP(address) === 4) return IPV4_PRIVATE.some((pattern) => pattern.test(address));
-  const normalized = address.toLowerCase();
-  if (normalized === "::1" || normalized === "::") return true;
-  if (normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) return true;
-  if (normalized.startsWith("::ffff:")) return isPrivateAddress(normalized.slice(7));
-  return false;
+  const family = isIP(address);
+  if (family === 4) return NON_PUBLIC_V4.check(address, "ipv4");
+  if (family === 6) return NON_PUBLIC_V6.check(address, "ipv6");
+  // A resolver result should always be an IP. Fail closed if a custom resolver
+  // or future runtime ever violates that contract.
+  return true;
 }
 
 export function parseOutboundUrl(raw: string): URL {
@@ -55,4 +61,3 @@ export async function safeDispatcher(raw: string): Promise<{ url: URL; dispatche
   });
   return { url, dispatcher };
 }
-

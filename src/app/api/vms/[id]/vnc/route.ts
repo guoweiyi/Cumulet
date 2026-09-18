@@ -1,4 +1,5 @@
 import { api, json } from "@/lib/api";
+import { randomUUID } from "node:crypto";
 import { audit } from "@/lib/audit";
 import { encryptSecret } from "@/lib/crypto";
 import { LIMITS, rateLimit } from "@/lib/rate-limit";
@@ -23,6 +24,8 @@ export const POST = api<Ctx>(async (_req, ctx) => {
     const target = client.vncWebsocketTarget(binding.vmid, proxy.port, proxy.ticket);
     const wsToken = encryptSecret(
       JSON.stringify({
+        aud: "cumulet-vncws",
+        jti: randomUUID(),
         exp: Date.now() + 60_000,
         url: target.url,
         auth: target.headers.Authorization,
