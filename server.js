@@ -27,6 +27,17 @@ const canonicalOrigin = (() => {
   try { return new URL(process.env.NEXTAUTH_URL || `http://localhost:${port}`).origin; }
   catch { return `http://localhost:${port}`; }
 })();
+const usedVncTokens = new Map();
+
+function consumeVncToken(jti, exp) {
+  const now = Date.now();
+  for (const [id, expiresAt] of usedVncTokens) {
+    if (expiresAt < now) usedVncTokens.delete(id);
+  }
+  if (usedVncTokens.has(jti)) return false;
+  usedVncTokens.set(jti, exp);
+  return true;
+}
 
 function decryptToken(token) {
   const keyHex = process.env.APP_ENCRYPTION_KEY;
@@ -68,12 +79,23 @@ app.prepare().then(() => {
       return;
     }
 
+    // WebSocket handshakes are not covered by the browser's same-origin
+    // policy. Reject cross-site websocket hijacking before consuming a token.
+    if (req.headers.origin !== canonicalOrigin) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
     let target;
     try {
       target = decryptToken(url.searchParams.get("token") || "");
+      if (target.aud !== "cumulet-vncws" || typeof target.jti !== "string" || target.jti.length > 128) throw new Error("bad token");
       if (typeof target.exp !== "number" || target.exp < Date.now()) throw new Error("expired");
+      if (typeof target.url !== "string" || typeof target.auth !== "string") throw new Error("bad target");
       const parsed = new URL(target.url);
       if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") throw new Error("bad target");
+      if (!consumeVncToken(target.jti, target.exp)) throw new Error("replayed");
     } catch {
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
