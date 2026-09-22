@@ -9,7 +9,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 export const GET = api<Ctx>(async (_req, ctx) => {
   const { id } = await ctx.params;
-  const { user, binding } = await requireBindingAccess(id);
+  const { user, binding } = await requireBindingAccess(id, { write: true });
   if (!binding.initialPasswordEnc) throw notFound();
   const workflowSchema = binding.workflowSchemaId
     ? await prisma.workflowSchema.findUnique({ where: { id: binding.workflowSchemaId }, select: { definition: true } })
