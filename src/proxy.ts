@@ -20,6 +20,7 @@ export default async function proxy(req: NextRequest) {
     pathname.startsWith("/api/auth/") ||
     pathname === "/api/health" ||
     pathname === "/api/internal/ai/cron" ||
+    pathname === "/api/internal/lifecycle/cron" ||
     pathname.startsWith("/credentials/") ||
     pathname.startsWith("/api/credentials/");
   if (isPublic) return NextResponse.next();
